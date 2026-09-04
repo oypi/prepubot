@@ -15,7 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "nexto
 
 from read_position import get_rocket_league_pid, RLMemoryReader
 from nexto_driver import NextoDriver
-from virtual_controller import VirtualXboxController, VirtualKeyboardController
+from virtual_controller import VirtualXboxController
 
 
 def check_game_window_focused():
@@ -141,16 +141,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                 elif cmd == "set_focus_guard":
                     focus_guard = bool(msg.get("enabled", False))
                 elif cmd == "set_input_mode":
-                    target_mode = str(msg.get("mode", "kbm")).upper()
-                    if target_mode != input_mode:
-                        controller.reset()
-                        controller.close()
-                        if target_mode == "GAMEPAD":
-                            controller = VirtualXboxController()
-                            input_mode = "GAMEPAD"
-                        else:
-                            controller = VirtualKeyboardController()
-                            input_mode = "KBM"
+                    pass  # Pure Gamepad emulation, KBM deprecated
                 elif cmd == "quit":
                     controller.reset()
                     return
@@ -379,7 +370,6 @@ def main():
     parser = argparse.ArgumentParser(description="Rocket League Nexto Autonomous Bot")
     parser.add_argument("--ipc", action="store_true", help="Run in JSON IPC mode for GUI integration")
     parser.add_argument("--start-active", action="store_true", help="Start playing immediately in IPC mode")
-    parser.add_argument("--kbm", action="store_true", help="Use Virtual Keyboard instead of default Virtual Xbox 360 controller")
     args = parser.parse_args()
 
     pid = get_rocket_league_pid()
@@ -404,12 +394,7 @@ def main():
             print("    Please ensure you are inside a Freeplay match.")
         sys.exit(1)
 
-    if args.kbm:
-        controller = VirtualKeyboardController()
-        initial_mode = "KBM"
-    else:
-        controller = VirtualXboxController()
-        initial_mode = "GAMEPAD"
+    controller = VirtualXboxController()
 
     driver = NextoDriver(pid, pc_ptr)
 

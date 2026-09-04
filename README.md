@@ -21,7 +21,6 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
   - Emulates a hardware-level Microsoft Xbox 360 controller using Linux `/dev/uinput`.
   - Continuous analog triggers for throttle and brake (`RT`/`LT`), left stick for steering, yaw, and pitch.
   - Directional flip mapping for dodges and aerial maneuvers.
-  - Includes a Virtual Keyboard & Mouse (KBM) fallback controller.
 - **Autonomous Play & Kickoffs (`nexto_play.py`)**:
   - Physics-synchronized 120Hz polling with 15 Hz decision intervals (`tick_skip = 8`).
   - Automated kickoff detection: frame-accurate speedflip sequences for diagonal spawns and neural net play for central kickoffs.
@@ -31,7 +30,7 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
   - Clean cyberpunk dark-mode GUI built with `egui` and `eframe`.
   - Live HUD displaying car speed, boost percentage, ball distance, current action, teammate/opponent status, and FPS.
   - Global background hotkey thread listening for **F6** across all raw input devices.
-  - Controls for input mode toggle, window focus guard, and window pin (always on top).
+  - Controls for window focus guard, and window pin (always on top).
 
 ---
 
@@ -48,7 +47,7 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
 ├── nexto_driver.py        # Observation builder and memory state bridge
 ├── nexto_play.py          # Bot runner, decision scheduler, kickoff sequencer, IPC
 ├── read_position.py       # Unreal Engine memory reflection & scanner
-└── virtual_controller.py  # evdev /dev/uinput Xbox 360 & KBM virtual controllers
+└── virtual_controller.py  # evdev /dev/uinput Xbox 360 virtual controller
 ```
 
 ---
@@ -93,14 +92,13 @@ Make sure Rocket League is running (in Freeplay, Custom Match, or Exhibition), t
 ### 3. Usage & Hotkeys
 - **F6**: Global toggle hotkey. Press **F6** at any time while playing to instantly activate or deactivate the bot.
 - **Overlay HUD**: Displays real-time memory telemetry and live controller actions.
-- **Input Mode**: Gamepad is active by default. You can toggle between **GAMEPAD** and **KBM** via the UI button.
+- **Input Emulation**: Pure native Microsoft Xbox 360 gamepad emulation via `/dev/uinput`.
 
 ### 4. Running CLI-only (without GUI)
 You can also run the bot directly in terminal mode:
 ```bash
 python3 nexto_play.py
 ```
-*(Add `--kbm` if you wish to force keyboard/mouse emulation instead of virtual gamepad).*
 
 ---
 

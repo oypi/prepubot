@@ -335,7 +335,6 @@ impl eframe::App for PrepuBotApp {
         let connected = state_guard.connected;
         let active = state_guard.active;
         let team = state_guard.team;
-        let input_mode = state_guard.input_mode.clone();
         let focus_guard = state_guard.focus_guard;
         let fps = state_guard.fps;
         let car_pos = state_guard.car_pos;
@@ -374,49 +373,19 @@ impl eframe::App for PrepuBotApp {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
 
-                    // 1. TOP BAR / BRANDING HEADER
+                    // 1. TOP BAR / BRANDING HEADER (Row 1)
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new("[::] PREPUBOT")
-                                .size(17.0)
+                                .size(16.0)
                                 .color(egui::Color32::from_rgb(250, 250, 250))
                                 .strong(),
                         );
                         ui.label(
-                            egui::RichText::new("// TACTICAL COMPANION")
-                                .size(10.5)
+                            egui::RichText::new("// TACTICAL")
+                                .size(10.0)
                                 .color(egui::Color32::from_rgb(120, 126, 138)),
                         );
-
-                        if connected {
-                            let team_badge = if team == 1 {
-                                "[ TEAM: ORANGE ]"
-                            } else {
-                                "[ TEAM: BLUE ]"
-                            };
-                            ui.label(
-                                egui::RichText::new(team_badge)
-                                    .size(10.0)
-                                    .color(egui::Color32::from_rgb(220, 225, 235))
-                                    .background_color(egui::Color32::from_rgb(32, 34, 42))
-                                    .strong(),
-                            );
-
-                            let mode_btn = egui::Button::new(
-                                egui::RichText::new(format!("[ {} ]", input_mode))
-                                    .size(10.0)
-                                    .color(egui::Color32::from_rgb(240, 240, 245))
-                                    .strong(),
-                            )
-                            .fill(egui::Color32::from_rgb(32, 34, 42))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 60, 72)))
-                            .corner_radius(egui::CornerRadius::same(4));
-
-                            if ui.add(mode_btn).clicked() {
-                                let new_mode = if input_mode == "GAMEPAD" { "kbm" } else { "gamepad" };
-                                self.send_command(&format!("{{\"cmd\": \"set_input_mode\", \"mode\": \"{}\"}}", new_mode));
-                            }
-                        }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Stay on top toggle button
@@ -427,7 +396,7 @@ impl eframe::App for PrepuBotApp {
                             };
 
                             let pin_btn = egui::Button::new(
-                                egui::RichText::new(pin_text).size(10.5).color(pin_fg).strong(),
+                                egui::RichText::new(pin_text).size(10.0).color(pin_fg).strong(),
                             )
                             .stroke(egui::Stroke::new(1.0, pin_stroke))
                             .corner_radius(egui::CornerRadius::same(4));
@@ -451,7 +420,7 @@ impl eframe::App for PrepuBotApp {
                             };
 
                             let guard_btn = egui::Button::new(
-                                egui::RichText::new(guard_text).size(10.5).color(guard_fg).strong(),
+                                egui::RichText::new(guard_text).size(10.0).color(guard_fg).strong(),
                             )
                             .stroke(egui::Stroke::new(1.0, guard_stroke))
                             .corner_radius(egui::CornerRadius::same(4));
@@ -459,11 +428,47 @@ impl eframe::App for PrepuBotApp {
                             if ui.add(guard_btn).clicked() {
                                 self.send_command(&format!("{{\"cmd\": \"set_focus_guard\", \"enabled\": {}}}", !focus_guard));
                             }
+                        });
+                    });
 
+                    // 2. STATUS & CONTROLS SUB-HEADER (Row 2)
+                    ui.horizontal(|ui| {
+                        if connected {
+                            let (team_badge, team_bg, team_fg) = if team == 1 {
+                                ("[ ORANGE TEAM ]", egui::Color32::from_rgb(50, 25, 10), egui::Color32::from_rgb(255, 160, 60))
+                            } else {
+                                ("[ BLUE TEAM ]", egui::Color32::from_rgb(10, 30, 55), egui::Color32::from_rgb(80, 170, 255))
+                            };
+                            ui.label(
+                                egui::RichText::new(team_badge)
+                                    .size(9.5)
+                                    .color(team_fg)
+                                    .background_color(team_bg)
+                                    .strong(),
+                            );
+
+                            ui.label(
+                                egui::RichText::new("[ XBOX 360 PAD ]")
+                                    .size(9.5)
+                                    .color(egui::Color32::from_rgb(130, 210, 150))
+                                    .background_color(egui::Color32::from_rgb(20, 35, 25))
+                                    .strong(),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("[ MEMORY SCANNING ]")
+                                    .size(9.5)
+                                    .color(egui::Color32::from_rgb(200, 160, 60))
+                                    .background_color(egui::Color32::from_rgb(32, 28, 16))
+                                    .strong(),
+                            );
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Hz Badge
                             ui.label(
                                 egui::RichText::new(format!("[ {:.0} HZ ]", fps))
-                                    .size(10.5)
+                                    .size(10.0)
                                     .color(egui::Color32::from_rgb(170, 175, 185))
                                     .monospace(),
                             );
@@ -1030,8 +1035,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("prepubot")
             .with_title("PrepuBot")
-            .with_inner_size([460.0, 740.0])
-            .with_min_inner_size([380.0, 580.0])
+            .with_inner_size([480.0, 750.0])
+            .with_min_inner_size([400.0, 600.0])
             .with_always_on_top()
             .with_resizable(true)
             .with_window_type(egui::X11WindowType::Utility),
