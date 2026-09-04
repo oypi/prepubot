@@ -1,0 +1,25 @@
+# Rust build artifacts
+target/
+nexto_gui/target/
+**/*.rs.bk
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv
+env/
+venv/
+
+# External reference repositories (cloned for analysis)
+launcher/
+NectoFamily/
+
+# Editor & OS metadata
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

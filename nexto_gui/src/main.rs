@@ -1,0 +1,1046 @@
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CarTelemetry {
+    #[serde(default)]
+    pub pos: Vec<f32>,
+    #[serde(default)]
+    pub spd: f32,
+    #[serde(default)]
+    pub boost: f32,
+    #[serde(default)]
+    pub on_ground: bool,
+    #[serde(default)]
+    pub has_flip: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BallTelemetry {
+    #[serde(default)]
+    pub pos: Vec<f32>,
+    #[serde(default)]
+    pub dist: f32,
+    #[serde(default)]
+    pub spd: f32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EnemyTelemetry {
+    #[serde(default)]
+    pub pos: Vec<f32>,
+    #[serde(default)]
+    pub spd: f32,
+    #[serde(default)]
+    pub boost: f32,
+    #[serde(default)]
+    pub dist: f32,
+    #[serde(default)]
+    pub ball_dist: f32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TelemetryMsg {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub team: i32,
+    #[serde(default)]
+    pub focus_guard: bool,
+    #[serde(default)]
+    pub fps: f32,
+    #[serde(default)]
+    pub car: CarTelemetry,
+    #[serde(default)]
+    pub ball: BallTelemetry,
+    #[serde(default)]
+    pub teammate: Option<EnemyTelemetry>,
+    #[serde(default)]
+    pub enemy: Option<EnemyTelemetry>,
+    #[serde(default)]
+    pub input_mode: String,
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+pub struct SharedState {
+    pub connected: bool,
+    pub active: bool,
+    pub team: i32,
+    pub input_mode: String,
+    pub focus_guard: bool,
+    pub fps: f32,
+    pub car_pos: [f32; 3],
+    pub car_spd: f32,
+    pub car_boost: f32,
+    pub car_on_ground: bool,
+    pub car_has_flip: bool,
+    pub ball_pos: [f32; 3],
+    pub ball_dist: f32,
+    pub ball_spd: f32,
+    pub teammate: Option<EnemyTelemetry>,
+    pub enemy: Option<EnemyTelemetry>,
+    pub action: String,
+    pub status_msg: String,
+    pub beta: f32,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            active: false,
+            team: 0,
+            input_mode: "GAMEPAD".to_string(),
+            focus_guard: false,
+            fps: 0.0,
+            car_pos: [0.0; 3],
+            car_spd: 0.0,
+            car_boost: 0.0,
+            car_on_ground: false,
+            car_has_flip: false,
+            ball_pos: [0.0; 3],
+            ball_dist: 0.0,
+            ball_spd: 0.0,
+            teammate: None,
+            enemy: None,
+            action: "IDLE".to_string(),
+            status_msg: "Initializing...".to_string(),
+            beta: 1.0,
+        }
+    }
+}
+
+pub struct PrepuBotApp {
+    state: Arc<Mutex<SharedState>>,
+    child_stdin: Arc<Mutex<Option<ChildStdin>>>,
+    python_script_path: PathBuf,
+    always_on_top: bool,
+}
+
+impl PrepuBotApp {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let child_stdin = Arc::new(Mutex::new(None));
+
+        let script_path = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
+
+        let app = Self {
+            state: state.clone(),
+            child_stdin: child_stdin.clone(),
+            python_script_path: script_path,
+            always_on_top: true,
+        };
+
+        app.spawn_backend();
+        Self::spawn_hotkey_thread(child_stdin.clone());
+
+        app
+    }
+
+    fn spawn_backend(&self) {
+        let state = self.state.clone();
+        let stdin_holder = self.child_stdin.clone();
+        let script = self.python_script_path.clone();
+
+        thread::spawn(move || {
+            loop {
+                {
+                    let mut s = state.lock().unwrap();
+                    s.status_msg = "Connecting to Rocket League...".to_string();
+                    s.connected = false;
+                    s.active = false;
+                }
+
+                let mut cmd = Command::new("python3");
+                cmd.arg(&script)
+                    .arg("--ipc")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().unwrap();
+                        let stdin = child.stdin.take().unwrap();
+                        {
+                            let mut holder = stdin_holder.lock().unwrap();
+                            *holder = Some(stdin);
+                        }
+
+                        let reader = BufReader::new(stdout);
+                        for line in reader.lines() {
+                            if let Ok(l) = line {
+                                if let Ok(telemetry) = serde_json::from_str::<TelemetryMsg>(&l) {
+                                    let mut s = state.lock().unwrap();
+                                    if telemetry.msg_type == "ready" {
+                                        s.connected = true;
+                                        s.status_msg = "Memory Attached".to_string();
+                                    } else if telemetry.msg_type == "telemetry" {
+                                        s.connected = true;
+                                        s.active = telemetry.active;
+                                        s.focus_guard = telemetry.focus_guard;
+                                        s.fps = telemetry.fps;
+                                        if telemetry.car.pos.len() >= 3 {
+                                            s.car_pos = [telemetry.car.pos[0], telemetry.car.pos[1], telemetry.car.pos[2]];
+                                        }
+                                        s.car_spd = telemetry.car.spd;
+                                        s.car_boost = telemetry.car.boost;
+                                        s.car_on_ground = telemetry.car.on_ground;
+                                        s.car_has_flip = telemetry.car.has_flip;
+
+                                        if telemetry.ball.pos.len() >= 3 {
+                                            s.ball_pos = [telemetry.ball.pos[0], telemetry.ball.pos[1], telemetry.ball.pos[2]];
+                                        }
+                                        s.ball_dist = telemetry.ball.dist;
+                                        s.ball_spd = telemetry.ball.spd;
+
+                                        s.team = telemetry.team;
+                                        s.teammate = telemetry.teammate;
+                                        s.enemy = telemetry.enemy;
+                                        if !telemetry.input_mode.is_empty() {
+                                            s.input_mode = telemetry.input_mode;
+                                        }
+
+                                        s.action = telemetry.action;
+                                        s.status_msg = if s.active { "Autonomous Running" } else { "Manual Control" }.to_string();
+                                    } else if telemetry.msg_type == "error" {
+                                        s.connected = false;
+                                        s.status_msg = telemetry.message.unwrap_or_else(|| "Error".to_string());
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let _ = child.wait();
+                        {
+                            let mut holder = stdin_holder.lock().unwrap();
+                            *holder = None;
+                        }
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().unwrap();
+                        s.status_msg = format!("Failed to spawn backend: {}", e);
+                    }
+                }
+
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    fn spawn_hotkey_thread(child_stdin: Arc<Mutex<Option<ChildStdin>>>) {
+        thread::spawn(move || {
+            let mut devices = Vec::new();
+            if let Ok(entries) = std::fs::read_dir("/dev/input") {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("event") {
+                            if let Ok(dev) = evdev::Device::open(&path) {
+                                if dev.supported_keys().map_or(false, |k| k.contains(evdev::KeyCode::KEY_F6)) {
+                                    devices.push(dev);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if devices.is_empty() {
+                eprintln!("[Hotkey] No keyboard with F6 found in /dev/input");
+                return;
+            }
+
+            println!("[Hotkey] Monitoring {} keyboard device(s) for F6...", devices.len());
+
+            for mut dev in devices {
+                let child_stdin = child_stdin.clone();
+                thread::spawn(move || {
+                    loop {
+                        match dev.fetch_events() {
+                            Ok(events) => {
+                                for ev in events {
+                                    if ev.event_type() == evdev::EventType::KEY && ev.code() == evdev::KeyCode::KEY_F6.0 && ev.value() == 1 {
+                                        println!("[Hotkey] F6 Pressed! Toggling PrepuBot...");
+                                        if let Ok(mut holder) = child_stdin.lock() {
+                                            if let Some(ref mut stdin) = *holder {
+                                                let _ = writeln!(stdin, "{{\"cmd\": \"toggle\"}}");
+                                                let _ = stdin.flush();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(15));
+                            }
+                            Err(_) => {
+                                thread::sleep(Duration::from_millis(100));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn send_command(&self, cmd: &str) {
+        if let Ok(mut holder) = self.child_stdin.lock() {
+            if let Some(ref mut stdin) = *holder {
+                let _ = writeln!(stdin, "{}", cmd);
+                let _ = stdin.flush();
+            }
+        }
+    }
+}
+
+impl eframe::App for PrepuBotApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // High refresh rate for fluid telemetry
+        ui.ctx().request_repaint_after(Duration::from_millis(30));
+
+        // Serious monochrome styling tokens
+        let mut visuals = egui::Visuals::dark();
+        visuals.override_text_color = Some(egui::Color32::from_rgb(240, 240, 242));
+        visuals.panel_fill = egui::Color32::from_rgb(13, 14, 16);
+        visuals.window_fill = egui::Color32::from_rgb(13, 14, 16);
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(19, 20, 24);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 48));
+        visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(24, 25, 30);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 48, 56));
+        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(36, 38, 45);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 95, 110));
+        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(240, 240, 242);
+        visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+        ui.ctx().set_visuals(visuals);
+
+        let state_guard = self.state.lock().unwrap();
+        let connected = state_guard.connected;
+        let active = state_guard.active;
+        let team = state_guard.team;
+        let input_mode = state_guard.input_mode.clone();
+        let focus_guard = state_guard.focus_guard;
+        let fps = state_guard.fps;
+        let car_pos = state_guard.car_pos;
+        let car_spd = state_guard.car_spd;
+        let car_boost = state_guard.car_boost;
+        let car_on_ground = state_guard.car_on_ground;
+        let car_has_flip = state_guard.car_has_flip;
+        let ball_pos = state_guard.ball_pos;
+        let ball_dist = state_guard.ball_dist;
+        let ball_spd = state_guard.ball_spd;
+        let teammate = state_guard.teammate.clone();
+        let enemy = state_guard.enemy.clone();
+        let action = state_guard.action.clone();
+        let mut beta = state_guard.beta;
+        drop(state_guard);
+
+        // Monochrome card frame tokens
+        let card_frame = egui::Frame {
+            inner_margin: egui::Margin::same(14),
+            corner_radius: egui::CornerRadius::same(8),
+            fill: egui::Color32::from_rgb(20, 21, 26),
+            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 50)),
+            ..Default::default()
+        };
+
+        // Outer margin container ensuring plenty of breathing room from window borders
+        let outer_container = egui::Frame {
+            inner_margin: egui::Margin::symmetric(22, 20),
+            fill: egui::Color32::from_rgb(13, 14, 16),
+            ..Default::default()
+        };
+
+        outer_container.show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
+
+                    // 1. TOP BAR / BRANDING HEADER
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("[::] PREPUBOT")
+                                .size(17.0)
+                                .color(egui::Color32::from_rgb(250, 250, 250))
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new("// TACTICAL COMPANION")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(120, 126, 138)),
+                        );
+
+                        if connected {
+                            let team_badge = if team == 1 {
+                                "[ TEAM: ORANGE ]"
+                            } else {
+                                "[ TEAM: BLUE ]"
+                            };
+                            ui.label(
+                                egui::RichText::new(team_badge)
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(220, 225, 235))
+                                    .background_color(egui::Color32::from_rgb(32, 34, 42))
+                                    .strong(),
+                            );
+
+                            let mode_btn = egui::Button::new(
+                                egui::RichText::new(format!("[ {} ]", input_mode))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(240, 240, 245))
+                                    .strong(),
+                            )
+                            .fill(egui::Color32::from_rgb(32, 34, 42))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 60, 72)))
+                            .corner_radius(egui::CornerRadius::same(4));
+
+                            if ui.add(mode_btn).clicked() {
+                                let new_mode = if input_mode == "GAMEPAD" { "kbm" } else { "gamepad" };
+                                self.send_command(&format!("{{\"cmd\": \"set_input_mode\", \"mode\": \"{}\"}}", new_mode));
+                            }
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Stay on top toggle button
+                            let (pin_text, pin_stroke, pin_fg) = if self.always_on_top {
+                                ("[ PIN: ON ]", egui::Color32::from_rgb(240, 240, 242), egui::Color32::from_rgb(250, 250, 250))
+                            } else {
+                                ("[ PIN: OFF ]", egui::Color32::from_rgb(60, 64, 74), egui::Color32::from_rgb(130, 136, 148))
+                            };
+
+                            let pin_btn = egui::Button::new(
+                                egui::RichText::new(pin_text).size(10.5).color(pin_fg).strong(),
+                            )
+                            .stroke(egui::Stroke::new(1.0, pin_stroke))
+                            .corner_radius(egui::CornerRadius::same(4));
+
+                            if ui.add(pin_btn).clicked() {
+                                self.always_on_top = !self.always_on_top;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                                    if self.always_on_top {
+                                        egui::WindowLevel::AlwaysOnTop
+                                    } else {
+                                        egui::WindowLevel::Normal
+                                    },
+                                ));
+                            }
+
+                            // Focus guard toggle button
+                            let (guard_text, guard_stroke, guard_fg) = if focus_guard {
+                                ("[ GUARD: ON ]", egui::Color32::from_rgb(240, 240, 242), egui::Color32::from_rgb(250, 250, 250))
+                            } else {
+                                ("[ GUARD: OFF ]", egui::Color32::from_rgb(60, 64, 74), egui::Color32::from_rgb(130, 136, 148))
+                            };
+
+                            let guard_btn = egui::Button::new(
+                                egui::RichText::new(guard_text).size(10.5).color(guard_fg).strong(),
+                            )
+                            .stroke(egui::Stroke::new(1.0, guard_stroke))
+                            .corner_radius(egui::CornerRadius::same(4));
+
+                            if ui.add(guard_btn).clicked() {
+                                self.send_command(&format!("{{\"cmd\": \"set_focus_guard\", \"enabled\": {}}}", !focus_guard));
+                            }
+
+                            // Hz Badge
+                            ui.label(
+                                egui::RichText::new(format!("[ {:.0} HZ ]", fps))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(170, 175, 185))
+                                    .monospace(),
+                            );
+                        });
+                    });
+
+                    // 2. HERO STATUS BANNER
+                    let (hero_bg, hero_border, hero_title, hero_desc) = match (connected, active, action.as_str()) {
+                        (false, _, _) => (
+                            egui::Color32::from_rgb(24, 25, 29),
+                            egui::Color32::from_rgb(65, 68, 77),
+                            "[!] LINK OFFLINE",
+                            "Searching for RocketLeague.exe memory...",
+                        ),
+                        (true, _, "PAUSED") => (
+                            egui::Color32::from_rgb(28, 29, 34),
+                            egui::Color32::from_rgb(115, 120, 132),
+                            "[||] GAME PAUSED",
+                            "In-game menu active — Inputs safely frozen",
+                        ),
+                        (true, _, "OUT OF FOCUS") => (
+                            egui::Color32::from_rgb(26, 27, 32),
+                            egui::Color32::from_rgb(100, 105, 116),
+                            "[-] WINDOW UNFOCUSED",
+                            "Rocket League in background — Autonomous idle",
+                        ),
+                        (true, true, _) => (
+                            egui::Color32::from_rgb(34, 36, 42),
+                            egui::Color32::from_rgb(245, 245, 248),
+                            "[#] AUTONOMOUS ENGAGED",
+                            "Nexto AI controlling Vehicle (120 FPS / 8-Tick)",
+                        ),
+                        (true, false, _) => (
+                            egui::Color32::from_rgb(22, 23, 27),
+                            egui::Color32::from_rgb(75, 80, 92),
+                            "[+] MANUAL PILOT",
+                            "Autonomous standing by — Press F6 to engage",
+                        ),
+                    };
+
+                    let hero_frame = egui::Frame {
+                        inner_margin: egui::Margin::symmetric(14, 12),
+                        corner_radius: egui::CornerRadius::same(8),
+                        fill: hero_bg,
+                        stroke: egui::Stroke::new(1.2, hero_border),
+                        ..Default::default()
+                    };
+
+                    hero_frame.show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(hero_title).size(14.0).color(egui::Color32::WHITE).strong());
+                            ui.add_space(1.0);
+                            ui.label(egui::RichText::new(hero_desc).size(10.5).color(egui::Color32::from_rgb(175, 180, 192)));
+                        });
+                    });
+
+                    // Primary Engagement Toggle Button (F6)
+                    let (btn_text, btn_fill, btn_fg, btn_stroke) = if !connected {
+                        (
+                            "[ AWAITING GAME CONNECTION ]",
+                            egui::Color32::from_rgb(24, 25, 30),
+                            egui::Color32::from_rgb(85, 90, 100),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 48)),
+                        )
+                    } else if active {
+                        (
+                            "[■] DISENGAGE PREPUBOT  [ F6 ]",
+                            egui::Color32::from_rgb(245, 245, 248),
+                            egui::Color32::from_rgb(14, 15, 18),
+                            egui::Stroke::NONE,
+                        )
+                    } else {
+                        (
+                            "[>] ENGAGE PREPUBOT  [ F6 ]",
+                            egui::Color32::from_rgb(26, 28, 34),
+                            egui::Color32::from_rgb(245, 245, 248),
+                            egui::Stroke::new(1.2, egui::Color32::from_rgb(140, 145, 160)),
+                        )
+                    };
+
+                    let toggle_btn = egui::Button::new(
+                        egui::RichText::new(btn_text)
+                            .size(14.0)
+                            .color(btn_fg)
+                            .strong(),
+                    )
+                    .fill(btn_fill)
+                    .stroke(btn_stroke)
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .min_size(egui::vec2(ui.available_width(), 40.0));
+
+                    if ui.add_enabled(connected, toggle_btn).clicked() {
+                        self.send_command("{\"cmd\": \"toggle\"}");
+                    }
+
+                    // 3. TELEMETRY STREAM
+                    card_frame.show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("// LIVE TELEMETRY (SELF)")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(130, 136, 148))
+                                .strong(),
+                        );
+
+                        ui.add_space(2.0);
+
+                        // Vehicle Speed Row
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("[CAR]")
+                                    .size(12.5)
+                                    .color(egui::Color32::from_rgb(240, 240, 245))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if car_spd > 2150.0 {
+                                    ui.label(
+                                        egui::RichText::new(" SUPERSONIC ")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(13, 14, 16))
+                                            .background_color(egui::Color32::from_rgb(240, 240, 245))
+                                            .strong(),
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} uu/s", car_spd))
+                                        .size(12.5)
+                                        .color(egui::Color32::WHITE)
+                                        .strong(),
+                                );
+                            });
+                        });
+
+                        // Speed bar
+                        let speed_frac = (car_spd / 2300.0).clamp(0.0, 1.0);
+                        ui.add(
+                            egui::ProgressBar::new(speed_frac)
+                                .fill(egui::Color32::from_rgb(220, 222, 228))
+                                .animate(active),
+                        );
+
+                        // Boost Gauge Row
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("BOOST: {:3.0}%", car_boost))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(220, 225, 235))
+                                    .monospace()
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if car_boost > 80.0 {
+                                    ui.label(
+                                        egui::RichText::new(" HIGH BOOST ")
+                                            .size(9.0)
+                                            .color(egui::Color32::from_rgb(13, 14, 16))
+                                            .background_color(egui::Color32::from_rgb(240, 240, 245))
+                                            .strong(),
+                                    );
+                                } else if car_boost < 15.0 {
+                                    ui.label(
+                                        egui::RichText::new(" LOW BOOST ")
+                                            .size(9.0)
+                                            .color(egui::Color32::from_rgb(245, 245, 248))
+                                            .background_color(egui::Color32::from_rgb(45, 48, 56)),
+                                    );
+                                }
+                            });
+                        });
+
+                        // Boost bar
+                        let boost_frac = (car_boost / 100.0).clamp(0.0, 1.0);
+                        ui.add(
+                            egui::ProgressBar::new(boost_frac)
+                                .fill(egui::Color32::from_rgb(200, 205, 215)),
+                        );
+
+                        // Physics / Ground State Row
+                        ui.horizontal(|ui| {
+                            let (phys_text, phys_bg, phys_fg) = if car_on_ground {
+                                ("[ GROUND ]", egui::Color32::from_rgb(28, 30, 36), egui::Color32::from_rgb(200, 205, 215))
+                            } else if car_has_flip {
+                                ("[ AIR: FLIP READY ]", egui::Color32::from_rgb(240, 240, 245), egui::Color32::from_rgb(13, 14, 16))
+                            } else {
+                                ("[ AIR: FLIP EXPIRED ]", egui::Color32::from_rgb(28, 30, 36), egui::Color32::from_rgb(130, 136, 148))
+                            };
+
+                            ui.label(
+                                egui::RichText::new(phys_text)
+                                    .size(9.5)
+                                    .color(phys_fg)
+                                    .background_color(phys_bg)
+                                    .strong(),
+                            );
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "X: {:5.0}  Y: {:5.0}  Z: {:4.0}",
+                                        car_pos[0], car_pos[1], car_pos[2]
+                                    ))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .monospace(),
+                                );
+                            });
+                        });
+
+                        ui.separator();
+
+                        // Ball Row
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("[BALL]")
+                                    .size(12.5)
+                                    .color(egui::Color32::from_rgb(240, 240, 245))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ball_dist < 260.0 {
+                                    ui.label(
+                                        egui::RichText::new(" POSSESSION ")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(13, 14, 16))
+                                            .background_color(egui::Color32::from_rgb(240, 240, 245))
+                                            .strong(),
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} uu away", ball_dist))
+                                        .size(12.5)
+                                        .color(egui::Color32::WHITE)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} uu/s", ball_spd))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(140, 145, 158)),
+                                );
+                            });
+                        });
+
+                        // Ball Proximity bar
+                        let dist_frac = (1.0 - (ball_dist / 4000.0)).clamp(0.0, 1.0);
+                        ui.add(
+                            egui::ProgressBar::new(dist_frac)
+                                .fill(egui::Color32::from_rgb(160, 165, 178)),
+                        );
+
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "X: {:5.0}  Y: {:5.0}  Z: {:4.0}",
+                                ball_pos[0], ball_pos[1], ball_pos[2]
+                            ))
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(130, 136, 148))
+                            .monospace(),
+                        );
+                    });
+
+                    // 4. ALLIED TEAMMATE RADAR CARD (if present in 2v2/3v3)
+                    if let Some(ref mate) = teammate {
+                        card_frame.show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("// ALLIED TEAMMATE RADAR [ 2V2 / 3V3 ]")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .strong(),
+                            );
+
+                            ui.add_space(2.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("[MATE]")
+                                        .size(12.5)
+                                        .color(egui::Color32::from_rgb(240, 240, 245))
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu away", mate.dist))
+                                            .size(12.5)
+                                            .color(egui::Color32::WHITE)
+                                            .strong(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu/s", mate.spd))
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(160, 165, 175)),
+                                    );
+                                });
+                            });
+
+                            // Teammate Boost row
+                            let mate_boost_frac = (mate.boost / 100.0).clamp(0.0, 1.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("BOOST: {:3.0}%", mate.boost))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(180, 185, 195))
+                                        .monospace(),
+                                );
+                                ui.add(
+                                    egui::ProgressBar::new(mate_boost_frac)
+                                        .fill(egui::Color32::from_rgb(160, 165, 178)),
+                                );
+                            });
+
+                            // Ball proximity dynamics
+                            ui.horizontal(|ui| {
+                                let (m_tag, m_bg, m_fg) = if mate.ball_dist < ball_dist {
+                                    ("[ TEAMMATE CLOSER TO BALL ]", egui::Color32::from_rgb(38, 41, 50), egui::Color32::from_rgb(240, 240, 245))
+                                } else {
+                                    ("[ YOU CLOSER TO BALL ]", egui::Color32::from_rgb(240, 240, 245), egui::Color32::from_rgb(13, 14, 16))
+                                };
+
+                                ui.label(
+                                    egui::RichText::new(m_tag)
+                                        .size(9.5)
+                                        .color(m_fg)
+                                        .background_color(m_bg)
+                                        .strong(),
+                                );
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu to ball", mate.ball_dist))
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(140, 145, 158)),
+                                    );
+                                });
+                            });
+
+                            if mate.pos.len() >= 3 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "X: {:5.0}  Y: {:5.0}  Z: {:4.0}",
+                                        mate.pos[0], mate.pos[1], mate.pos[2]
+                                    ))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .monospace(),
+                                );
+                            }
+                        });
+                    }
+
+                    // 5. ENEMY TARGET / TACTICAL RADAR CARD
+                    card_frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let header_title = if enemy.is_some() {
+                                "// ENEMY TARGET [ ACTIVE MATCH ]"
+                            } else {
+                                "// ENEMY TARGET [ FREEPLAY / 1v0 ]"
+                            };
+                            ui.label(
+                                egui::RichText::new(header_title)
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .strong(),
+                            );
+                        });
+
+                        ui.add_space(2.0);
+
+                        if let Some(ref opp) = enemy {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("[ENEMY]")
+                                        .size(12.5)
+                                        .color(egui::Color32::from_rgb(240, 240, 245))
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu away", opp.dist))
+                                            .size(12.5)
+                                            .color(egui::Color32::WHITE)
+                                            .strong(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu/s", opp.spd))
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(160, 165, 175)),
+                                    );
+                                });
+                            });
+
+                            // Enemy Boost row
+                            let opp_boost_frac = (opp.boost / 100.0).clamp(0.0, 1.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("BOOST: {:3.0}%", opp.boost))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(180, 185, 195))
+                                        .monospace(),
+                                );
+                                ui.add(
+                                    egui::ProgressBar::new(opp_boost_frac)
+                                        .fill(egui::Color32::from_rgb(160, 165, 178)),
+                                );
+                            });
+
+                            // Challenge dynamics
+                            ui.horizontal(|ui| {
+                                let (c_tag, c_bg, c_fg) = if opp.ball_dist < ball_dist {
+                                    ("[ OPPONENT CLOSER TO BALL ]", egui::Color32::from_rgb(45, 48, 56), egui::Color32::from_rgb(240, 240, 245))
+                                } else {
+                                    ("[ YOU BEAT OPPONENT TO BALL ]", egui::Color32::from_rgb(240, 240, 245), egui::Color32::from_rgb(13, 14, 16))
+                                };
+
+                                ui.label(
+                                    egui::RichText::new(c_tag)
+                                        .size(9.5)
+                                        .color(c_fg)
+                                        .background_color(c_bg)
+                                        .strong(),
+                                );
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.0} uu to ball", opp.ball_dist))
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(140, 145, 158)),
+                                    );
+                                });
+                            });
+
+                            if opp.pos.len() >= 3 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "X: {:5.0}  Y: {:5.0}  Z: {:4.0}",
+                                        opp.pos[0], opp.pos[1], opp.pos[2]
+                                    ))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .monospace(),
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("No opponent detected in arena — Solo Freeplay active")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(100, 105, 118)),
+                            );
+                        }
+                    });
+
+                    // 5. ACTIVE CONTROLS & ANNUNCIATOR MATRIX
+                    card_frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("// ACTIVE CONTROLS")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(&action)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(190, 195, 205))
+                                        .strong(),
+                                );
+                            });
+                        });
+
+                        ui.add_space(4.0);
+
+                        let tokens = [
+                            "FWD", "REV", "LEFT", "RIGHT", "JUMP", "BOOST", "SLIDE", "PITCH_UP", "PITCH_DN", "ROLL_L", "ROLL_R",
+                        ];
+
+                        ui.horizontal_wrapped(|ui| {
+                            for token in tokens {
+                                let is_on = action.contains(token);
+                                if is_on {
+                                    // High contrast active badge: stark solid white background, black text
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(" {} ", token))
+                                                .size(9.5)
+                                                .color(egui::Color32::from_rgb(10, 11, 13))
+                                                .background_color(egui::Color32::from_rgb(245, 245, 248))
+                                                .strong(),
+                                        ),
+                                    );
+                                } else {
+                                    // Inactive badge: dark subtle outline
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(" {} ", token))
+                                                .size(9.5)
+                                                .color(egui::Color32::from_rgb(85, 90, 102))
+                                                .background_color(egui::Color32::from_rgb(24, 25, 30)),
+                                        ),
+                                    );
+                                }
+                            }
+                        });
+                    });
+
+                    // 6. POLICY WEIGHT (BETA)
+                    card_frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("// POLICY WEIGHT (BETA)")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(130, 136, 148))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let mode = if beta >= 0.95 {
+                                    "[ EXPLOIT 1.0 ]"
+                                } else if beta >= 0.5 {
+                                    "[ BALANCED ]"
+                                } else {
+                                    "[ EXPLORE ]"
+                                };
+                                ui.label(
+                                    egui::RichText::new(mode)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(220, 225, 235))
+                                        .strong(),
+                                );
+                            });
+                        });
+
+                        ui.add_space(2.0);
+
+                        ui.horizontal(|ui| {
+                            let slider = egui::Slider::new(&mut beta, 0.1..=1.5).show_value(true);
+                            if ui.add(slider).changed() {
+                                let mut s = self.state.lock().unwrap();
+                                s.beta = beta;
+                                self.send_command(&format!("{{\"cmd\": \"set_beta\", \"beta\": {:.2}}}", beta));
+                            }
+                        });
+                    });
+
+                    // 7. EMERGENCY CONTROLLER RELEASE
+                    let stop_btn = egui::Button::new(
+                        egui::RichText::new("[!] EMERGENCY CONTROLLER RELEASE")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(175, 180, 192))
+                            .strong(),
+                    )
+                    .fill(egui::Color32::from_rgb(24, 25, 30))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 48, 56)))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .min_size(egui::vec2(ui.available_width(), 28.0));
+
+                    if ui.add(stop_btn).clicked() {
+                        self.send_command("{\"cmd\": \"stop\"}");
+                    }
+                });
+        });
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_app_id("prepubot")
+            .with_title("PrepuBot")
+            .with_inner_size([460.0, 740.0])
+            .with_min_inner_size([380.0, 580.0])
+            .with_always_on_top()
+            .with_resizable(true)
+            .with_window_type(egui::X11WindowType::Utility),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "PrepuBot",
+        native_options,
+        Box::new(|cc| Ok(Box::new(PrepuBotApp::new(cc)))),
+    )
+}
