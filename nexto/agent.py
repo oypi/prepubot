@@ -1,5 +1,6 @@
 import math
 import os
+import sys
 
 import numpy as np
 import torch
@@ -43,8 +44,15 @@ class Agent:
     state = None
 
     def __init__(self):
-        cur_dir = os.path.dirname(os.path.realpath(__file__))
-        with open(os.path.join(cur_dir, "nexto-model.pt"), "rb") as f:
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            model_path = os.path.join(sys._MEIPASS, "nexto", "nexto-model.pt")
+            if not os.path.exists(model_path):
+                model_path = os.path.join(sys._MEIPASS, "nexto-model.pt")
+        else:
+            cur_dir = os.path.dirname(os.path.realpath(__file__))
+            model_path = os.path.join(cur_dir, "nexto-model.pt")
+
+        with open(model_path, "rb") as f:
             self.actor = torch.jit.load(f)
         torch.set_num_threads(1)
 

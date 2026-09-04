@@ -52,56 +52,91 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
 
 ---
 
-## Prerequisites
+## Quick Start (Standalone Single-Binary for Friends)
 
-1. **Linux Kernel Permissions**:
-   The bot creates a virtual gamepad using `/dev/uinput` and reads process memory from `/proc/<pid>/mem`. Ensure your user has access:
-   ```bash
-   sudo usermod -aG input $USER
-   echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/99-uinput.rules
-   sudo udevadm control --reload-rules && sudo udevadm trigger
-   ```
-   *(Alternatively, run `sudo chmod 666 /dev/uinput` for temporary access).*
+If you share the standalone executable with friends, **they do NOT need Python, PyTorch, pip, git, or Rust installed**. Everything is embedded into a single portable binary.
 
-2. **Python Dependencies**:
-   ```bash
-   pip install torch numpy evdev
-   ```
+### 1. One-Line System Permission Setup
+On Linux (Ubuntu, Debian, Fedora, Arch, SteamOS), the bot requires permission to emulate an Xbox gamepad and inspect game memory:
 
-3. **Rust Toolchain** (for compiling GUI):
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
+```bash
+# 1. Allow gamepad emulation
+sudo chmod 666 /dev/uinput
+
+# 2. Allow reading game memory via /proc/<pid>/mem
+echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+
+# 3. (Optional) Ensure user is in input group for global F6 hotkey
+sudo usermod -aG input $USER
+```
+
+### 2. Run PrepuBot
+```bash
+chmod +x prepubot
+./prepubot
+```
+On first launch, PrepuBot automatically extracts its internal Nexto engine into `~/.cache/prepubot/` and connects to Rocket League.
 
 ---
 
-## Building and Running
+## Easy Anti-Cheat (EAC) Compatibility
 
-### 1. Build the Rust GUI
+Rocket League on Linux (via Steam Proton, Heroic Games Launcher, or Lutris) runs Easy Anti-Cheat in userspace inside Wine:
+
+1. **Automatic Process Disambiguation**:
+   When launched with EAC, two Rocket League processes exist:
+   - `RocketLeague_EAC.exe`: Integrity monitor bootstrap
+   - `RocketLeague.exe`: The actual Unreal Engine 3 game process
+
+   PrepuBot automatically detects and attaches exclusively to `RocketLeague.exe`, completely ignoring `RocketLeague_EAC.exe`.
+
+2. **Dual Operating Modes**:
+   - **Default EAC Mode**: PrepuBot functions out-of-process via Linux `/proc/<pid>/mem` reading.
+   - **Offline Mode (`-noeac`)**: For zero-risk offline play in Freeplay and custom training, you can add `-noeac` to Rocket League's launch arguments in Steam or Heroic. PrepuBot seamlessly connects to both modes.
+
+---
+
+## Building the Standalone Binary
+
+To produce the single-file distribution binary (`dist/prepubot`):
+
+```bash
+./build_standalone.sh
+```
+
+This automated script bundles PyTorch CPU, NumPy, evdev, the Nexto Transformer weights, and the Cyberpunk HUD GUI into `dist/prepubot` (~388 MB).
+
+---
+
+## Building from Source (Developer Mode)
+
+### Prerequisites
+- Python 3.10+ with `torch`, `numpy`, `evdev`
+- Rust toolchain (`cargo`, `rustc`)
+
+### 1. Build GUI
 ```bash
 cd nexto_gui
 cargo build --release
 ```
 
-### 2. Launch PrepuBot
-Make sure Rocket League is running (in Freeplay, Custom Match, or Exhibition), then run:
+### 2. Run
 ```bash
 ./nexto_gui/target/release/prepubot
 ```
 
-### 3. Usage & Hotkeys
-- **F6**: Global toggle hotkey. Press **F6** at any time while playing to instantly activate or deactivate the bot.
-- **Overlay HUD**: Displays real-time memory telemetry and live controller actions.
-- **Input Emulation**: Pure native Microsoft Xbox 360 gamepad emulation via `/dev/uinput`.
+---
 
-### 4. Running CLI-only (without GUI)
-You can also run the bot directly in terminal mode:
-```bash
-python3 nexto_play.py
-```
+## Usage & Controls
+
+- **F6**: Global toggle hotkey. Press **F6** at any time while playing to instantly engage or disengage autonomous driving.
+- **PIN Button**: Pins the HUD window to stay always on top of Rocket League.
+- **GUARD Button**: Focus guard. Pauses bot actions when Rocket League window is unfocused (Alt-Tabbed).
+- **HUD Telemetry**: Displays real-time speed, boost percentage, ball distance, action state, and teammate/opponent markers.
 
 ---
 
 ## License
 
 MIT License. Educational and local offline research use only.
+

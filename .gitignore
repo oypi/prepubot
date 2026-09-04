@@ -17,9 +17,15 @@ venv/
 launcher/
 NectoFamily/
 
+# Build & distribution binaries
+dist/
+nexto_gui/embedded_backend/
+*.spec
+
 # Editor & OS metadata
 .idea/
 .vscode/
 *.swp
 *~
 .DS_Store
+

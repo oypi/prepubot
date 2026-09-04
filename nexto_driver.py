@@ -10,7 +10,10 @@ import struct
 import numpy as np
 import torch
 
-from agent import Agent
+try:
+    from nexto.agent import Agent
+except ImportError:
+    from agent import Agent
 
 # Standard Rocket League boost pad positions (34 pads in standard arena)
 BOOST_LOCATIONS = np.array([

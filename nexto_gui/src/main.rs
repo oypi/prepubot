@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -7,6 +8,89 @@ use std::time::Duration;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+
+core::arch::global_asm!(concat!(
+    r#"
+    .section .rodata.embedded_backend,"a",@progbits
+    .globl _embedded_backend_start
+    .globl _embedded_backend_end
+_embedded_backend_start:
+    .incbin ""#,
+    env!("CARGO_MANIFEST_DIR"),
+    r#"/embedded_backend/nexto_backend"
+_embedded_backend_end:
+"#
+));
+
+unsafe extern "C" {
+    static _embedded_backend_start: u8;
+    static _embedded_backend_end: u8;
+}
+
+fn get_embedded_backend() -> &'static [u8] {
+    unsafe {
+        let start = std::ptr::addr_of!(_embedded_backend_start);
+        let end = std::ptr::addr_of!(_embedded_backend_end);
+        let len = (end as usize).saturating_sub(start as usize);
+        std::slice::from_raw_parts(start, len)
+    }
+}
+
+fn extract_backend_if_needed() -> Result<PathBuf, String> {
+    let base_dir = if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".cache").join("prepubot")
+    } else {
+        std::env::temp_dir().join("prepubot")
+    };
+
+    std::fs::create_dir_all(&base_dir)
+        .map_err(|e| format!("Failed to create cache directory {:?}: {}", base_dir, e))?;
+
+    let backend_path = base_dir.join("nexto_backend");
+    let embedded = get_embedded_backend();
+
+    // If embedded backend exists in this binary
+    if !embedded.is_empty() {
+        let needs_write = match std::fs::metadata(&backend_path) {
+            Ok(m) => m.len() != embedded.len() as u64,
+            Err(_) => true,
+        };
+
+        if needs_write {
+            let tmp_path = base_dir.join("nexto_backend.tmp");
+            std::fs::write(&tmp_path, embedded)
+                .map_err(|e| format!("Failed to extract backend binary: {}", e))?;
+            if let Ok(m) = std::fs::metadata(&tmp_path) {
+                let mut p = m.permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&tmp_path, p);
+            }
+            std::fs::rename(&tmp_path, &backend_path)
+                .map_err(|e| format!("Failed to finalize backend binary: {}", e))?;
+        } else if let Ok(m) = std::fs::metadata(&backend_path) {
+            let mut p = m.permissions();
+            if p.mode() & 0o111 == 0 {
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&backend_path, p);
+            }
+        }
+        return Ok(backend_path);
+    }
+
+    // Developer fallback: check nexto_play.py in current or parent dirs
+    if let Ok(cwd) = std::env::current_dir() {
+        let dev_path = cwd.join("nexto_play.py");
+        if dev_path.exists() {
+            return Ok(dev_path);
+        }
+    }
+    let default_dev = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
+    if default_dev.exists() {
+        return Ok(default_dev);
+    }
+
+    Err("Could not find nexto_backend executable or nexto_play.py".to_string())
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CarTelemetry {
@@ -93,6 +177,7 @@ pub struct SharedState {
     pub enemy: Option<EnemyTelemetry>,
     pub action: String,
     pub status_msg: String,
+    pub permission_alert: Option<String>,
     pub beta: f32,
 }
 
@@ -116,7 +201,8 @@ impl Default for SharedState {
             teammate: None,
             enemy: None,
             action: "IDLE".to_string(),
-            status_msg: "Initializing...".to_string(),
+            status_msg: "Connecting to Rocket League...".to_string(),
+            permission_alert: None,
             beta: 1.0,
         }
     }
@@ -125,7 +211,6 @@ impl Default for SharedState {
 pub struct PrepuBotApp {
     state: Arc<Mutex<SharedState>>,
     child_stdin: Arc<Mutex<Option<ChildStdin>>>,
-    python_script_path: PathBuf,
     always_on_top: bool,
 }
 
@@ -134,12 +219,9 @@ impl PrepuBotApp {
         let state = Arc::new(Mutex::new(SharedState::default()));
         let child_stdin = Arc::new(Mutex::new(None));
 
-        let script_path = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
-
         let app = Self {
             state: state.clone(),
             child_stdin: child_stdin.clone(),
-            python_script_path: script_path,
             always_on_top: true,
         };
 
@@ -152,20 +234,39 @@ impl PrepuBotApp {
     fn spawn_backend(&self) {
         let state = self.state.clone();
         let stdin_holder = self.child_stdin.clone();
-        let script = self.python_script_path.clone();
 
         thread::spawn(move || {
+            let backend_target = match extract_backend_if_needed() {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.status_msg = format!("Setup error: {}", e);
+                    s.permission_alert = Some(e);
+                    return;
+                }
+            };
+
+            let is_python = backend_target.extension().map_or(false, |ext| ext == "py");
+
             loop {
                 {
                     let mut s = state.lock().unwrap();
-                    s.status_msg = "Connecting to Rocket League...".to_string();
+                    if s.permission_alert.is_none() {
+                        s.status_msg = "Connecting to Rocket League...".to_string();
+                    }
                     s.connected = false;
                     s.active = false;
                 }
 
-                let mut cmd = Command::new("python3");
-                cmd.arg(&script)
-                    .arg("--ipc")
+                let mut cmd = if is_python {
+                    let mut c = Command::new("python3");
+                    c.arg(&backend_target);
+                    c
+                } else {
+                    Command::new(&backend_target)
+                };
+
+                cmd.arg("--ipc")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null());
@@ -187,8 +288,10 @@ impl PrepuBotApp {
                                     if telemetry.msg_type == "ready" {
                                         s.connected = true;
                                         s.status_msg = "Memory Attached".to_string();
+                                        s.permission_alert = None;
                                     } else if telemetry.msg_type == "telemetry" {
                                         s.connected = true;
+                                        s.permission_alert = None;
                                         s.active = telemetry.active;
                                         s.focus_guard = telemetry.focus_guard;
                                         s.fps = telemetry.fps;
@@ -217,7 +320,16 @@ impl PrepuBotApp {
                                         s.status_msg = if s.active { "Autonomous Running" } else { "Manual Control" }.to_string();
                                     } else if telemetry.msg_type == "error" {
                                         s.connected = false;
-                                        s.status_msg = telemetry.message.unwrap_or_else(|| "Error".to_string());
+                                        let raw_msg = telemetry.message.unwrap_or_else(|| "Error".to_string());
+                                        if raw_msg == "YAMA_PTRACE_DENIED" {
+                                            s.status_msg = "Yama ptrace blocked".to_string();
+                                            s.permission_alert = Some("PTRACE PERMISSION: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or run with sudo".to_string());
+                                        } else if raw_msg == "UINPUT_DENIED" {
+                                            s.status_msg = "UInput permission denied".to_string();
+                                            s.permission_alert = Some("UINPUT PERMISSION: Run 'sudo chmod 666 /dev/uinput'".to_string());
+                                        } else {
+                                            s.status_msg = raw_msg;
+                                        }
                                     }
                                 }
                             } else {
@@ -348,6 +460,8 @@ impl eframe::App for PrepuBotApp {
         let teammate = state_guard.teammate.clone();
         let enemy = state_guard.enemy.clone();
         let action = state_guard.action.clone();
+        let status_msg = state_guard.status_msg.clone();
+        let permission_alert = state_guard.permission_alert.clone();
         let mut beta = state_guard.beta;
         drop(state_guard);
 
@@ -431,6 +545,34 @@ impl eframe::App for PrepuBotApp {
                         });
                     });
 
+                    // Permission Guidance Alert Banner (if any)
+                    if let Some(ref alert) = permission_alert {
+                        egui::Frame {
+                            inner_margin: egui::Margin::symmetric(14, 10),
+                            corner_radius: egui::CornerRadius::same(6),
+                            fill: egui::Color32::from_rgb(38, 18, 16),
+                            stroke: egui::Stroke::new(1.2, egui::Color32::from_rgb(230, 80, 60)),
+                            ..Default::default()
+                        }
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("[!] PERMISSION REQUIRED")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(255, 110, 90))
+                                        .strong(),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(alert)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(245, 220, 220))
+                                        .monospace(),
+                                );
+                            });
+                        });
+                    }
+
                     // 2. STATUS & CONTROLS SUB-HEADER (Row 2)
                     ui.horizontal(|ui| {
                         if connected {
@@ -477,12 +619,27 @@ impl eframe::App for PrepuBotApp {
 
                     // 2. HERO STATUS BANNER
                     let (hero_bg, hero_border, hero_title, hero_desc) = match (connected, active, action.as_str()) {
-                        (false, _, _) => (
-                            egui::Color32::from_rgb(24, 25, 29),
-                            egui::Color32::from_rgb(65, 68, 77),
-                            "[!] LINK OFFLINE",
-                            "Searching for RocketLeague.exe memory...",
-                        ),
+                        (false, _, _) => {
+                            if permission_alert.is_some() {
+                                (
+                                    egui::Color32::from_rgb(34, 18, 16),
+                                    egui::Color32::from_rgb(180, 60, 50),
+                                    "[!] ACTION REQUIRED",
+                                    "Permission restriction detected. See instructions above.",
+                                )
+                            } else {
+                                (
+                                    egui::Color32::from_rgb(24, 25, 29),
+                                    egui::Color32::from_rgb(65, 68, 77),
+                                    "[!] LINK OFFLINE",
+                                    if status_msg.is_empty() {
+                                        "Searching for RocketLeague.exe memory..."
+                                    } else {
+                                        status_msg.as_str()
+                                    },
+                                )
+                            }
+                        }
                         (true, _, "PAUSED") => (
                             egui::Color32::from_rgb(28, 29, 34),
                             egui::Color32::from_rgb(115, 120, 132),

@@ -11,7 +11,11 @@ import signal
 import numpy as np
 import subprocess
 
-sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "nexto"))
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    sys.path.insert(0, sys._MEIPASS)
+    sys.path.insert(0, os.path.join(sys._MEIPASS, "nexto"))
+else:
+    sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "nexto"))
 
 from read_position import get_rocket_league_pid, RLMemoryReader
 from nexto_driver import NextoDriver
@@ -381,9 +385,17 @@ def main():
             print("Error: Rocket League process (RocketLeague.exe) not running!")
         sys.exit(1)
 
-    scanner = RLMemoryReader(pid)
-    pc_ptr = scanner.find_player_controller()
-    scanner.close()
+    try:
+        scanner = RLMemoryReader(pid)
+        pc_ptr = scanner.find_player_controller()
+        scanner.close()
+    except PermissionError as e:
+        if args.ipc:
+            import json
+            print(json.dumps({"type": "error", "message": "YAMA_PTRACE_DENIED", "details": str(e)}), flush=True)
+        else:
+            print(f"\n[!] {e}\n")
+        sys.exit(1)
 
     if not pc_ptr:
         if args.ipc:
@@ -394,9 +406,25 @@ def main():
             print("    Please ensure you are inside a Freeplay match.")
         sys.exit(1)
 
-    controller = VirtualXboxController()
+    try:
+        controller = VirtualXboxController()
+    except Exception as e:
+        if args.ipc:
+            import json
+            print(json.dumps({"type": "error", "message": "UINPUT_DENIED", "details": "Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput"}), flush=True)
+        else:
+            print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
+        sys.exit(1)
 
-    driver = NextoDriver(pid, pc_ptr)
+    try:
+        driver = NextoDriver(pid, pc_ptr)
+    except PermissionError as e:
+        if args.ipc:
+            import json
+            print(json.dumps({"type": "error", "message": "YAMA_PTRACE_DENIED", "details": str(e)}), flush=True)
+        else:
+            print(f"\n[!] {e}\n")
+        sys.exit(1)
 
     if args.ipc:
         try:

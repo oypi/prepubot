@@ -21,19 +21,61 @@ OFFSET_VELOCITY = 0x1A8    # FVector: float Vx, float Vy, float Vz
 
 
 def get_rocket_league_pid():
+    candidates = []
+    # 1. Try pgrep
     try:
-        out = subprocess.check_output(["pgrep", "-f", "RocketLeague.exe"]).decode().strip().split()
-        if out:
-            return int(out[0])
+        out = subprocess.check_output(["pgrep", "-i", "RocketLeague"]).decode().strip().split()
+        pids = [int(p) for p in out if p.isdigit()]
     except Exception:
-        pass
-    return None
+        pids = []
+
+    # 2. Fallback to /proc directory listing if pgrep is unavailable or empty
+    if not pids:
+        try:
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    pids.append(int(entry))
+        except Exception:
+            pass
+
+    for pid in pids:
+        if pid == os.getpid():
+            continue
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if not os.path.exists(cmdline_path):
+            continue
+        try:
+            with open(cmdline_path, "rb") as f:
+                cmdline = f.read().decode(errors="ignore").replace("\0", " ")
+
+            cmdline_lower = cmdline.lower()
+            # Strictly exclude EAC integrity bootstrap, launchers, and our own processes
+            if "rocketleague_eac.exe" in cmdline_lower or "easyanticheat" in cmdline_lower:
+                continue
+            if "launcher.exe" in cmdline_lower:
+                continue
+            if "nexto" in cmdline_lower or "prepubot" in cmdline_lower or "python" in cmdline_lower:
+                continue
+            if "rocketleague.exe" in cmdline_lower:
+                candidates.append(pid)
+        except Exception:
+            continue
+
+    return candidates[0] if candidates else None
+
 
 
 class RLMemoryReader:
     def __init__(self, pid):
         self.pid = pid
-        self.mem_file = open(f"/proc/{pid}/mem", "rb")
+        try:
+            self.mem_file = open(f"/proc/{pid}/mem", "rb")
+        except PermissionError as e:
+            raise PermissionError(
+                f"Failed to open /proc/{pid}/mem: Permission denied.\n"
+                f"Linux kernel Yama security (ptrace_scope) is restricting memory reading.\n"
+                f"Fix: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or run prepubot with sudo."
+            ) from e
         self.names_cache = {}
         self.resolve_globals()
 
