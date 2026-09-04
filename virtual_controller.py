@@ -36,7 +36,6 @@ class VirtualXboxController:
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, 0)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RX, 0)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RY, 0)
-        self.prev_jump = False
         # Triggers
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, 0)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, 0)
@@ -45,7 +44,7 @@ class VirtualXboxController:
             self.ui.write(ecodes.EV_KEY, btn, 0)
         self.ui.syn()
 
-    def apply_action(self, action, on_ground=True, car_z=17.0, time_in_decision=0.0, is_kickoff=False):
+    def apply_action(self, action, on_ground=True, car_z=17.0, time_in_decision=0.0):
         """
         Translates Nexto action array into gamepad events.
         action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
@@ -67,36 +66,22 @@ class VirtualXboxController:
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, rt)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, lt)
 
-        # Jump button pulse handling:
-        # If jumping while airborne and jump was held in the prior decision step,
-        # release BTN_A for 1 physics tick (~8.33ms) so Rocket League detects the rising edge
-        # required to trigger bJump_JustPressed for double jumps and dodges.
-        if jump_val:
-            if not on_ground and getattr(self, "prev_jump", False) and time_in_decision < 0.012:
-                jump_btn = 0
-            else:
-                jump_btn = 1
-        else:
-            jump_btn = 0
-
-        if on_ground:
-            # ON GROUND: stick X controls steering, stick Y centered (no pitch)
+        if on_ground and not jump_val:
+            # Normal ground driving: stick X steers, stick Y centered
             stick_x = int(steer_val * 32767)
             stick_y = 0
             roll_left = 0
             roll_right = 0
         else:
-            # AIRBORNE
+            # Airborne or jumping/flipping
             if jump_val:
-                # DODGE / FLIP / DOUBLE JUMP frame
-                # Nexto conveys flip direction strictly via roll (roll > 0 = right, roll < 0 = left).
-                # If roll is 0, the lateral flip deflection MUST be 0 to allow clean vertical double jumps.
+                # DODGE / FLIP frame: stick controls flip direction
                 if abs(roll_val) > 0.1:
                     stick_x = int(roll_val * 32767)
-                elif is_kickoff and abs(yaw_val) > 0.1:
+                elif abs(yaw_val) > 0.1:
                     stick_x = int(yaw_val * 32767)
                 else:
-                    stick_x = 0  # Center stick X! Eliminates accidental side flips during double jumps & aerial contests
+                    stick_x = int(steer_val * 32767)
 
                 # Xbox gamepad: ABS_Y negative = stick UP = pitch nose down
                 stick_y = int(pitch_val * 32767)
@@ -104,14 +89,14 @@ class VirtualXboxController:
                 roll_right = 0
             else:
                 # Free aerial flight / flip cancel / recovery
-                stick_x = int(yaw_val * 32767) if abs(yaw_val) > 0.05 else int(steer_val * 32767)
+                stick_x = int(yaw_val * 32767) if abs(yaw_val) > 0.1 else int(steer_val * 32767)
                 stick_y = int(pitch_val * 32767)
                 roll_left = 1 if roll_val < -0.1 else 0
                 roll_right = 1 if roll_val > 0.1 else 0
 
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, max(-32768, min(32767, stick_x)))
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, max(-32768, min(32767, stick_y)))
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, jump_btn)
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, 1 if jump_val else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_B, 1 if boost_val else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, 1 if (handbrake_val and (on_ground or car_z < 50.0)) else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, roll_left)

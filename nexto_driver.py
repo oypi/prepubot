@@ -265,8 +265,6 @@ class NextoDriver:
                 "boost": boost,
                 "on_ground": on_ground,
                 "has_flip": has_flip,
-                "jumped": jumped,
-                "double_jumped": double_jumped,
             }
         except Exception:
             return None
