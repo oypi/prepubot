@@ -59,7 +59,7 @@ cargo build --release --manifest-path "$SCRIPT_DIR/nexto_gui/Cargo.toml"
 
 # 4. Copy to dist
 echo "[4/4] Finalizing single binary in $DIST_DIR/prepubot..."
-cp "$SCRIPT_DIR/nexto_gui/target/release/prepubot" "$DIST_DIR/prepubot"
+cp --remove-destination "$SCRIPT_DIR/nexto_gui/target/release/prepubot" "$DIST_DIR/prepubot"
 chmod +x "$DIST_DIR/prepubot"
 
 echo ""

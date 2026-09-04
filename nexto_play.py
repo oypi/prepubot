@@ -79,7 +79,7 @@ DIAGONAL_KICKOFF_SEQUENCE = np.array(
     + 4 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly left
     + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
     + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
-    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.0, 1, 1, 0]]  # Diagonal flip right
+    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.8, 1, 1, 0]]  # Diagonal flip right
     + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
     + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery
     dtype=np.float32
@@ -308,6 +308,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
                 on_ground=(car["on_ground"] > 0.5),
                 car_z=float(car["pos"][2]),
                 time_in_decision=time_since_decision,
+                is_kickoff=kickoff_active,
             )
         else:
             controller.reset()
@@ -547,7 +548,13 @@ def main():
                     continue
 
             if car is not None:
-                controller.apply_action(action, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]), time_in_decision=(now - last_decision_time))
+                controller.apply_action(
+                    action,
+                    on_ground=(car["on_ground"] > 0.5),
+                    car_z=float(car["pos"][2]),
+                    time_in_decision=(now - last_decision_time),
+                    is_kickoff=False,
+                )
 
             frames += 1
             now = time.perf_counter()
