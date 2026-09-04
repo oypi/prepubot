@@ -169,10 +169,14 @@ class RLMemoryReader:
         self.gnames_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
 
         self.mem_file.seek(GOBJECTS_ADDR)
-        self.gobjects_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
-
-        self.mem_file.seek(GOBJECTS_COUNT_ADDR)
-        self.gobjects_count = struct.unpack("<I", self.mem_file.read(4))[0]
+        raw = self.mem_file.read(16)
+        if len(raw) >= 12:
+            self.gobjects_ptr, self.gobjects_count = struct.unpack("<QI", raw[:12])
+        else:
+            self.mem_file.seek(GOBJECTS_ADDR)
+            self.gobjects_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
+            self.mem_file.seek(GOBJECTS_COUNT_ADDR)
+            self.gobjects_count = struct.unpack("<I", self.mem_file.read(4))[0]
 
     def get_name(self, name_idx):
         if name_idx in self.names_cache:
@@ -198,6 +202,7 @@ class RLMemoryReader:
 
     def find_player_controller(self):
         """Locates the active PlayerController_TA in PersistentLevel (sub-100ms via class pointer caching)."""
+        self.resolve_globals()
         self.mem_file.seek(self.gobjects_ptr)
         raw_ptrs = self.mem_file.read(self.gobjects_count * 8)
         ptrs = struct.unpack(f"<{self.gobjects_count}Q", raw_ptrs)
@@ -206,6 +211,7 @@ class RLMemoryReader:
         level_class = getattr(self, "level_class_ptr", None)
 
         best_pc = None
+        fallback_pc = None
 
         for ptr in reversed(ptrs):
             if not ptr:
@@ -257,10 +263,14 @@ class RLMemoryReader:
                                     return ptr
                                 elif not best_pc:
                                     best_pc = ptr
+                            elif not fallback_pc:
+                                fallback_pc = ptr
+                        elif not fallback_pc:
+                            fallback_pc = ptr
             except Exception:
                 continue
 
-        return best_pc
+        return best_pc or fallback_pc
 
     def get_entities_from_pc(self, pc_ptr):
         """Reads active Car and Ball directly from PlayerController_TA (survives goals & respawns)."""
@@ -365,6 +375,7 @@ class RLMemoryReader:
                 self.mem_file.seek(outer + 0x50)
                 level_class = struct.unpack("<Q", self.mem_file.read(8))[0]
 
+            self.resolve_globals()
             self.mem_file.seek(self.gobjects_ptr)
             raw_ptrs = self.mem_file.read(self.gobjects_count * 8)
             ptrs = struct.unpack(f"<{self.gobjects_count}Q", raw_ptrs)
@@ -407,6 +418,7 @@ class RLMemoryReader:
                 return car_ptr, ball_ptr
 
         # Fallback scan backwards through GObjects
+        self.resolve_globals()
         self.mem_file.seek(self.gobjects_ptr)
         raw_ptrs = self.mem_file.read(self.gobjects_count * 8)
         ptrs = struct.unpack(f"<{self.gobjects_count}Q", raw_ptrs)

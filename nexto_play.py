@@ -176,18 +176,6 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
             kickoff_active = False
             action = np.zeros(8, dtype=np.int32)
             controller.reset()
-            # If entities are missing, check if player has returned to the main menu
-            if driver.pc_ptr:
-                try:
-                    active_pc = driver.reader.find_player_controller()
-                    if not active_pc:
-                        driver.pc_ptr = None
-                        driver.car_ptr = None
-                        driver.ball_ptr = None
-                        driver.mate_ptrs = []
-                        driver.opp_ptrs = []
-                except Exception:
-                    driver.pc_ptr = None
             is_in_menu = (driver.pc_ptr is None)
             telemetry = {
                 "type": "telemetry",

@@ -126,12 +126,12 @@ class NextoDriver:
             # If either car or ball is missing, PlayerController may be stale (new match or map started)
             if not self.car_ptr or not self.ball_ptr:
                 new_pc = self.reader.find_player_controller()
-                if new_pc and new_pc != self.pc_ptr:
+                if new_pc:
                     self.pc_ptr = new_pc
                     c, b = self.reader.get_entities_from_pc(new_pc)
                     if c: self.car_ptr = c
                     if b: self.ball_ptr = b
-                elif not new_pc:
+                else:
                     # PlayerController is gone — player left match or returned to main menu!
                     self.pc_ptr = None
                     self.car_ptr = None
