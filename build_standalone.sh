@@ -14,7 +14,7 @@ echo "================================================================"
 echo "          Building PrepuBot Single-Binary Standalone            "
 echo "================================================================"
 
-BUILD_VENV="/tmp/test_pyinstaller2"
+BUILD_VENV="/tmp/prepubot_venv"
 EMBEDDED_DIR="$SCRIPT_DIR/nexto_gui/embedded_backend"
 DIST_DIR="$SCRIPT_DIR/dist"
 
@@ -24,9 +24,8 @@ mkdir -p "$DIST_DIR"
 # 1. Ensure builder Python virtual environment exists with dependencies
 if [ ! -f "$BUILD_VENV/bin/pyinstaller" ]; then
     echo "[1/4] Setting up build Python virtual environment at $BUILD_VENV..."
-    python3 -m venv "$BUILD_VENV"
-    "$BUILD_VENV/bin/pip" install --upgrade pip
-    "$BUILD_VENV/bin/pip" install torch numpy evdev pyinstaller
+    python3 -m venv --system-site-packages "$BUILD_VENV"
+    "$BUILD_VENV/bin/pip" install -q pyinstaller
 else
     echo "[1/4] Reusing existing build virtual environment at $BUILD_VENV"
 fi

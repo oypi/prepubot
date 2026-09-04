@@ -37,6 +37,24 @@ fn get_embedded_backend() -> &'static [u8] {
 }
 
 fn extract_backend_if_needed() -> Result<PathBuf, String> {
+    // 1. Developer mode: If running via `cargo run` (binary inside target/) or PREPUBOT_DEV is set,
+    // prefer running nexto_play.py directly with system python3 for instant code changes.
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let is_cargo_dev = current_exe.to_string_lossy().contains("/target/") || std::env::var("PREPUBOT_DEV").is_ok();
+
+    if is_cargo_dev {
+        if let Ok(cwd) = std::env::current_dir() {
+            let dev_path = cwd.join("nexto_play.py");
+            if dev_path.exists() {
+                return Ok(dev_path);
+            }
+        }
+        let default_dev = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
+        if default_dev.exists() {
+            return Ok(default_dev);
+        }
+    }
+
     let base_dir = if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".cache").join("prepubot")
     } else {
@@ -51,10 +69,23 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
 
     // If embedded backend exists in this binary
     if !embedded.is_empty() {
-        let needs_write = match std::fs::metadata(&backend_path) {
-            Ok(m) => m.len() != embedded.len() as u64,
-            Err(_) => true,
-        };
+        // Fast FNV-1a hash over sampled slices + size to detect rebuilds
+        let mut hasher: u64 = 0xcbf29ce484222325;
+        hasher ^= embedded.len() as u64;
+        hasher = hasher.wrapping_mul(0x100000001b3);
+        let sample_step = (embedded.len() / 512).max(1);
+        for chunk in embedded.chunks(sample_step) {
+            if let Some(&b) = chunk.first() {
+                hasher ^= b as u64;
+                hasher = hasher.wrapping_mul(0x100000001b3);
+            }
+        }
+
+        let hash_file = base_dir.join("backend.hash");
+        let cached_hash = std::fs::read_to_string(&hash_file).unwrap_or_default();
+        let expected_hash = format!("{:016x}_{}", hasher, embedded.len());
+
+        let needs_write = cached_hash != expected_hash || !backend_path.exists();
 
         if needs_write {
             let tmp_path = base_dir.join("nexto_backend.tmp");
@@ -67,6 +98,7 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
             }
             std::fs::rename(&tmp_path, &backend_path)
                 .map_err(|e| format!("Failed to finalize backend binary: {}", e))?;
+            let _ = std::fs::write(&hash_file, expected_hash);
         } else if let Ok(m) = std::fs::metadata(&backend_path) {
             let mut p = m.permissions();
             if p.mode() & 0o111 == 0 {
@@ -135,6 +167,8 @@ pub struct TelemetryMsg {
     #[serde(rename = "type")]
     pub msg_type: String,
     #[serde(default)]
+    pub state: String,
+    #[serde(default)]
     pub active: bool,
     #[serde(default)]
     pub team: i32,
@@ -160,6 +194,7 @@ pub struct TelemetryMsg {
 
 pub struct SharedState {
     pub connected: bool,
+    pub in_menu: bool,
     pub active: bool,
     pub team: i32,
     pub input_mode: String,
@@ -185,6 +220,7 @@ impl Default for SharedState {
     fn default() -> Self {
         Self {
             connected: false,
+            in_menu: false,
             active: false,
             team: 0,
             input_mode: "GAMEPAD".to_string(),
@@ -255,6 +291,7 @@ impl PrepuBotApp {
                         s.status_msg = "Connecting to Rocket League...".to_string();
                     }
                     s.connected = false;
+                    s.in_menu = false;
                     s.active = false;
                 }
 
@@ -285,12 +322,24 @@ impl PrepuBotApp {
                             if let Ok(l) = line {
                                 if let Ok(telemetry) = serde_json::from_str::<TelemetryMsg>(&l) {
                                     let mut s = state.lock().unwrap();
-                                    if telemetry.msg_type == "ready" {
+                                    if telemetry.msg_type == "status" {
+                                        if telemetry.state == "IN_MENU" {
+                                            s.connected = true;
+                                            s.in_menu = true;
+                                            s.active = false;
+                                            s.status_msg = telemetry.message.unwrap_or_else(|| "In Main Menu".to_string());
+                                            s.permission_alert = None;
+                                        } else {
+                                            s.status_msg = telemetry.message.unwrap_or_default();
+                                        }
+                                    } else if telemetry.msg_type == "ready" {
                                         s.connected = true;
+                                        s.in_menu = false;
                                         s.status_msg = "Memory Attached".to_string();
                                         s.permission_alert = None;
                                     } else if telemetry.msg_type == "telemetry" {
                                         s.connected = true;
+                                        s.in_menu = telemetry.state == "IN_MENU" || telemetry.action == "IN MENU";
                                         s.permission_alert = None;
                                         s.active = telemetry.active;
                                         s.focus_guard = telemetry.focus_guard;
@@ -317,9 +366,16 @@ impl PrepuBotApp {
                                         }
 
                                         s.action = telemetry.action;
-                                        s.status_msg = if s.active { "Autonomous Running" } else { "Manual Control" }.to_string();
+                                        s.status_msg = if s.in_menu {
+                                            "In Main Menu".to_string()
+                                        } else if s.active {
+                                            "Autonomous Running".to_string()
+                                        } else {
+                                            "Manual Control".to_string()
+                                        };
                                     } else if telemetry.msg_type == "error" {
                                         s.connected = false;
+                                        s.in_menu = false;
                                         let raw_msg = telemetry.message.unwrap_or_else(|| "Error".to_string());
                                         if raw_msg == "YAMA_PTRACE_DENIED" {
                                             s.status_msg = "Yama ptrace blocked".to_string();
@@ -445,6 +501,7 @@ impl eframe::App for PrepuBotApp {
 
         let state_guard = self.state.lock().unwrap();
         let connected = state_guard.connected;
+        let in_menu = state_guard.in_menu;
         let active = state_guard.active;
         let team = state_guard.team;
         let focus_guard = state_guard.focus_guard;
@@ -576,18 +633,28 @@ impl eframe::App for PrepuBotApp {
                     // 2. STATUS & CONTROLS SUB-HEADER (Row 2)
                     ui.horizontal(|ui| {
                         if connected {
-                            let (team_badge, team_bg, team_fg) = if team == 1 {
-                                ("[ ORANGE TEAM ]", egui::Color32::from_rgb(50, 25, 10), egui::Color32::from_rgb(255, 160, 60))
+                            if in_menu {
+                                ui.label(
+                                    egui::RichText::new("[ IN MAIN MENU ]")
+                                        .size(9.5)
+                                        .color(egui::Color32::from_rgb(56, 189, 248))
+                                        .background_color(egui::Color32::from_rgb(14, 32, 48))
+                                        .strong(),
+                                );
                             } else {
-                                ("[ BLUE TEAM ]", egui::Color32::from_rgb(10, 30, 55), egui::Color32::from_rgb(80, 170, 255))
-                            };
-                            ui.label(
-                                egui::RichText::new(team_badge)
-                                    .size(9.5)
-                                    .color(team_fg)
-                                    .background_color(team_bg)
-                                    .strong(),
-                            );
+                                let (team_badge, team_bg, team_fg) = if team == 1 {
+                                    ("[ ORANGE TEAM ]", egui::Color32::from_rgb(50, 25, 10), egui::Color32::from_rgb(255, 160, 60))
+                                } else {
+                                    ("[ BLUE TEAM ]", egui::Color32::from_rgb(10, 30, 55), egui::Color32::from_rgb(80, 170, 255))
+                                };
+                                ui.label(
+                                    egui::RichText::new(team_badge)
+                                        .size(9.5)
+                                        .color(team_fg)
+                                        .background_color(team_bg)
+                                        .strong(),
+                                );
+                            }
 
                             ui.label(
                                 egui::RichText::new("[ XBOX 360 PAD ]")
@@ -618,8 +685,8 @@ impl eframe::App for PrepuBotApp {
                     });
 
                     // 2. HERO STATUS BANNER
-                    let (hero_bg, hero_border, hero_title, hero_desc) = match (connected, active, action.as_str()) {
-                        (false, _, _) => {
+                    let (hero_bg, hero_border, hero_title, hero_desc) = match (connected, in_menu, active, action.as_str()) {
+                        (false, _, _, _) => {
                             if permission_alert.is_some() {
                                 (
                                     egui::Color32::from_rgb(34, 18, 16),
@@ -640,25 +707,31 @@ impl eframe::App for PrepuBotApp {
                                 )
                             }
                         }
-                        (true, _, "PAUSED") => (
+                        (true, true, _, _) => (
+                            egui::Color32::from_rgb(14, 26, 36),
+                            egui::Color32::from_rgb(56, 189, 248),
+                            "[~] IN MAIN MENU",
+                            "Rocket League active — Enter Freeplay or a Match to engage",
+                        ),
+                        (true, false, _, "PAUSED") => (
                             egui::Color32::from_rgb(28, 29, 34),
                             egui::Color32::from_rgb(115, 120, 132),
                             "[||] GAME PAUSED",
                             "In-game menu active — Inputs safely frozen",
                         ),
-                        (true, _, "OUT OF FOCUS") => (
+                        (true, false, _, "OUT OF FOCUS") => (
                             egui::Color32::from_rgb(26, 27, 32),
                             egui::Color32::from_rgb(100, 105, 116),
                             "[-] WINDOW UNFOCUSED",
                             "Rocket League in background — Autonomous idle",
                         ),
-                        (true, true, _) => (
+                        (true, false, true, _) => (
                             egui::Color32::from_rgb(34, 36, 42),
                             egui::Color32::from_rgb(245, 245, 248),
                             "[#] AUTONOMOUS ENGAGED",
                             "Nexto AI controlling Vehicle (120 FPS / 8-Tick)",
                         ),
-                        (true, false, _) => (
+                        (true, false, false, _) => (
                             egui::Color32::from_rgb(22, 23, 27),
                             egui::Color32::from_rgb(75, 80, 92),
                             "[+] MANUAL PILOT",
@@ -689,6 +762,13 @@ impl eframe::App for PrepuBotApp {
                             egui::Color32::from_rgb(24, 25, 30),
                             egui::Color32::from_rgb(85, 90, 100),
                             egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 48)),
+                        )
+                    } else if in_menu {
+                        (
+                            "[ STANDING BY (IN MENU) ]",
+                            egui::Color32::from_rgb(16, 26, 36),
+                            egui::Color32::from_rgb(100, 160, 200),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 60, 85)),
                         )
                     } else if active {
                         (

@@ -81,10 +81,16 @@ class NextoDriver:
         self.agent = Agent()
         self.prev_action = np.zeros(8, dtype=np.float32)
         self.norm = np.array([1.0] * 5 + [2300.0] * 6 + [1.0] * 6 + [5.5] * 3 + [1.0] * 4, dtype=np.float32)
+        self.boost_timers = np.zeros(34, dtype=np.float32)
+        self.last_obs_time = time.time()
 
         if not self.pc_ptr:
             self.reacquire_player_controller()
         self.update_entities()
+
+    def reset_boost_pads(self):
+        """Resets all boost pads to fully active (called on kickoff / match start)."""
+        self.boost_timers.fill(0.0)
 
     def reacquire_player_controller(self):
         try:
@@ -382,6 +388,22 @@ class NextoDriver:
         kv[0, ball_idx, LIN_VEL] = ball["vel"]
         kv[0, ball_idx, ANG_VEL] = ball["ang_vel"]
 
+        # Advance boost pad simulation timers
+        now = time.time()
+        dt = min(max(now - self.last_obs_time, 0.001), 0.5)
+        self.last_obs_time = now
+        self.boost_timers = np.maximum(0.0, self.boost_timers - dt)
+
+        # Detect boost pickup by any active car on pitch
+        all_cars = [car] + [m for m in mate_list if m is not None] + [o for o in opp_list if o is not None]
+        for c in all_cars:
+            c_pos = c["pos"]
+            dists = np.linalg.norm(BOOST_LOCATIONS - c_pos, axis=1)
+            collected_indices = np.where((dists < 165.0) & (self.boost_timers <= 0.0))[0]
+            for idx in collected_indices:
+                is_big = BOOST_LOCATIONS[idx, 2] > 72.0
+                self.boost_timers[idx] = 10.0 if is_big else 4.0
+
         # Boost pads
         boost_start = n_players + 1
         for i in range(34):
@@ -389,6 +411,8 @@ class NextoDriver:
             kv[0, b_idx, IS_BOOST] = 1.0
             kv[0, b_idx, POS] = BOOST_LOCATIONS[i]
             kv[0, b_idx, BOOST_FEAT] = 1.0 if BOOST_LOCATIONS[i, 2] > 72 else 0.12
+            # Nexto observation spec: DEMO feature on boost entities is 1.0 if pad is available, 0.0 if on cooldown
+            kv[0, b_idx, DEMO] = 1.0 if self.boost_timers[i] <= 0.0 else 0.0
 
         # 180-degree field inversion for Orange Team (team == 1)
         # Inverts (x, y) coordinates so Orange goal (+Y) is treated as Blue goal (-Y)

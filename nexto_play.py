@@ -171,8 +171,10 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
             kickoff_active = False
             action = np.zeros(8, dtype=np.int32)
             controller.reset()
+            is_in_menu = (driver.pc_ptr is None)
             telemetry = {
                 "type": "telemetry",
+                "state": "IN_MENU" if is_in_menu else "MATCH",
                 "active": active,
                 "team": driver.team,
                 "focus_guard": focus_guard,
@@ -181,7 +183,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                 "ball": {"pos": [0.0, 0.0, 0.0], "dist": 0.0, "spd": 0.0},
                 "teammate": None,
                 "enemy": None,
-                "action": "GOAL / RESPAWN",
+                "action": "IN MENU" if is_in_menu else "GOAL / RESPAWN",
             }
             print(json.dumps(telemetry), flush=True)
             time.sleep(0.01)
@@ -194,6 +196,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
 
         # Kickoff detection: ball is at center and nearly stationary
         is_kickoff_ball = (ball_dist_center < 35.0 and ball_spd < 50.0)
+        if is_kickoff_ball:
+            driver.reset_boost_pads()
 
         if not is_kickoff_ball or ball_dist_center > 60.0 or ball_spd > 150.0:
             kickoff_active = False
@@ -387,23 +391,12 @@ def main():
 
     try:
         scanner = RLMemoryReader(pid)
-        pc_ptr = scanner.find_player_controller()
-        scanner.close()
     except PermissionError as e:
         if args.ipc:
             import json
             print(json.dumps({"type": "error", "message": "YAMA_PTRACE_DENIED", "details": str(e)}), flush=True)
         else:
             print(f"\n[!] {e}\n")
-        sys.exit(1)
-
-    if not pc_ptr:
-        if args.ipc:
-            import json
-            print(json.dumps({"type": "error", "message": "PlayerController not found in PersistentLevel"}), flush=True)
-        else:
-            print("[-] Could not locate PlayerController in PersistentLevel!")
-            print("    Please ensure you are inside a Freeplay match.")
         sys.exit(1)
 
     try:
@@ -415,6 +408,51 @@ def main():
         else:
             print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
         sys.exit(1)
+
+    pc_ptr = scanner.find_player_controller()
+
+    # If in main menu (PlayerController not yet active in a match)
+    if not pc_ptr:
+        if args.ipc:
+            import json
+            import select
+            print(json.dumps({"type": "status", "state": "IN_MENU", "message": "In Main Menu"}), flush=True)
+            while not pc_ptr:
+                if not os.path.exists(f"/proc/{pid}"):
+                    print(json.dumps({"type": "error", "message": "Rocket League process not running"}), flush=True)
+                    sys.exit(1)
+
+                while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                    line = sys.stdin.readline()
+                    if not line:
+                        return
+                    try:
+                        msg = json.loads(line.strip())
+                        if msg.get("cmd") == "quit":
+                            return
+                    except Exception:
+                        pass
+
+                print(json.dumps({"type": "status", "state": "IN_MENU", "message": "In Main Menu"}), flush=True)
+                time.sleep(0.5)
+                try:
+                    pc_ptr = scanner.find_player_controller()
+                except Exception:
+                    pass
+        else:
+            print("[-] In Main Menu — Waiting for Freeplay / match...", end="\r", flush=True)
+            while not pc_ptr:
+                if not os.path.exists(f"/proc/{pid}"):
+                    print("\n[-] Rocket League process exited.")
+                    sys.exit(1)
+                time.sleep(1.0)
+                try:
+                    pc_ptr = scanner.find_player_controller()
+                except Exception:
+                    pass
+            print("\n[+] Match detected! Attaching Nexto...")
+
+    scanner.close()
 
     try:
         driver = NextoDriver(pid, pc_ptr)
