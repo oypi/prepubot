@@ -315,10 +315,12 @@ class NextoDriver:
         except Exception:
             return None
 
-    def build_observation(self, car, ball, teammates=None, opponents=None, team=0):
+    def build_observation(self, car, ball, teammates=None, opponents=None, team=0, latency_comp=0.0035):
         """
         Constructs Nexto's (q, kv, m) tensors in self-relative coordinate frame.
         Supports 1v1, 2v2, 3v3 and inverts the field by 180 deg when playing on Orange team (team == 1).
+        Applies dead-reckoning extrapolation (default 3.5ms) to compensate for memory-read,
+        inference, and controller-dispatch latency so Nexto's action arrives synchronously with game physics.
         """
         mate_list = [m for m in (teammates or []) if m is not None]
         opp_list = [o for o in (opponents or []) if o is not None]
@@ -347,10 +349,40 @@ class NextoDriver:
         kv = np.zeros((1, n_entities, 24), dtype=np.float32)
         m = np.zeros((1, n_entities), dtype=np.float32)
 
+        # Dead-reckoning extrapolation (x = x0 + v * dt)
+        if latency_comp > 0.0:
+            car_pos = (car["pos"] + car["vel"] * latency_comp).copy()
+            car_pos[0] = np.clip(car_pos[0], -4096.0, 4096.0)
+            car_pos[1] = np.clip(car_pos[1], -5120.0, 5120.0)
+            car_pos[2] = np.clip(car_pos[2], 17.0, 2048.0)
+
+            ball_pos = (ball["pos"] + ball["vel"] * latency_comp).copy()
+            ball_vel = ball["vel"].copy()
+            if ball_pos[2] > 95.0:
+                # Standard Rocket League gravity: -650 uu/s^2 along Z when airborne
+                ball_pos[2] += 0.5 * (-650.0) * (latency_comp ** 2)
+                ball_vel[2] += (-650.0) * latency_comp
+            ball_pos[0] = np.clip(ball_pos[0], -4096.0, 4096.0)
+            ball_pos[1] = np.clip(ball_pos[1], -5120.0, 5120.0)
+            ball_pos[2] = np.clip(ball_pos[2], 92.75, 2048.0)
+        else:
+            car_pos = car["pos"]
+            ball_pos = ball["pos"]
+            ball_vel = ball["vel"]
+
+        def extrapolate_car_pos(c):
+            if latency_comp <= 0.0 or c is None:
+                return c["pos"] if c is not None else np.zeros(3, dtype=np.float32)
+            p = (c["pos"] + c["vel"] * latency_comp).copy()
+            p[0] = np.clip(p[0], -4096.0, 4096.0)
+            p[1] = np.clip(p[1], -5120.0, 5120.0)
+            p[2] = np.clip(p[2], 17.0, 2048.0)
+            return p
+
         # 0: Car (Self)
         kv[0, 0, IS_SELF] = 1.0
         kv[0, 0, IS_MATE] = 1.0
-        kv[0, 0, POS] = car["pos"]
+        kv[0, 0, POS] = car_pos
         kv[0, 0, LIN_VEL] = car["vel"]
         kv[0, 0, FW] = car["fw"]
         kv[0, 0, UP] = car["up"]
@@ -364,7 +396,7 @@ class NextoDriver:
         curr_idx = 1
         for mate in mate_list:
             kv[0, curr_idx, IS_MATE] = 1.0
-            kv[0, curr_idx, POS] = mate["pos"]
+            kv[0, curr_idx, POS] = extrapolate_car_pos(mate)
             kv[0, curr_idx, LIN_VEL] = mate["vel"]
             kv[0, curr_idx, FW] = mate["fw"]
             kv[0, curr_idx, UP] = mate["up"]
@@ -378,7 +410,7 @@ class NextoDriver:
         # curr_idx .. n_players - 1: Opponents
         for opp in opp_list:
             kv[0, curr_idx, IS_OPP] = 1.0
-            kv[0, curr_idx, POS] = opp["pos"]
+            kv[0, curr_idx, POS] = extrapolate_car_pos(opp)
             kv[0, curr_idx, LIN_VEL] = opp["vel"]
             kv[0, curr_idx, FW] = opp["fw"]
             kv[0, curr_idx, UP] = opp["up"]
@@ -392,8 +424,8 @@ class NextoDriver:
         # Ball
         ball_idx = n_players
         kv[0, ball_idx, IS_BALL] = 1.0
-        kv[0, ball_idx, POS] = ball["pos"]
-        kv[0, ball_idx, LIN_VEL] = ball["vel"]
+        kv[0, ball_idx, POS] = ball_pos
+        kv[0, ball_idx, LIN_VEL] = ball_vel
         kv[0, ball_idx, ANG_VEL] = ball["ang_vel"]
 
         # Advance boost pad simulation timers

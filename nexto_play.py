@@ -91,7 +91,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
     focus_guard = False
     input_mode = initial_mode
     beta = 1.0
-    fps_timer = time.time()
+    fps_timer = time.perf_counter()
     frames = 0
     fps = 0.0
 
@@ -117,7 +117,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
     print(json.dumps({"type": "ready"}), flush=True)
 
     while True:
-        loop_start = time.time()
+        loop_start = time.perf_counter()
 
         # Check for stdin commands without blocking
         while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
@@ -154,7 +154,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
             except Exception:
                 pass
 
-        now = time.time()
+        now = time.perf_counter()
 
         # Check window focus every 250ms using universal multi-desktop detection
         if now - last_focus_check >= 0.25:
@@ -322,7 +322,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
             controller.reset()
 
         frames += 1
-        now = time.time()
+        now = time.perf_counter()
         if now - fps_timer >= 1.0:
             fps = frames / (now - fps_timer)
             frames = 0
@@ -386,9 +386,15 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
             }
             print(json.dumps(telemetry), flush=True)
 
-        elapsed = time.time() - loop_start
-        # Poll at ~120 Hz (8.33 ms)
-        time.sleep(max(0.001, (1.0 / 120.0) - elapsed))
+        # High-precision hybrid clock: exact 120.0 Hz (8.333 ms per frame)
+        # Uses sleep() for coarse waiting to preserve low CPU usage,
+        # then busy-spins for the remaining sub-millisecond for microsecond-level accuracy.
+        target_tick = loop_start + (1.0 / 120.0)
+        remaining = target_tick - time.perf_counter()
+        if remaining > 0.002:
+            time.sleep(remaining - 0.0015)
+        while time.perf_counter() < target_tick:
+            pass
 
 
 def main():
@@ -510,7 +516,7 @@ def main():
 
     print("\n[>>>] NEXTO IS PLAYING! Press Ctrl+C to stop.\n")
 
-    fps_timer = time.time()
+    fps_timer = time.perf_counter()
     frames = 0
     fps = 0.0
 
@@ -525,8 +531,8 @@ def main():
 
     try:
         while running:
-            loop_start = time.time()
-            now = time.time()
+            loop_start = time.perf_counter()
+            now = time.perf_counter()
 
             if now - last_decision_time >= DECISION_INTERVAL:
                 last_decision_time = now
@@ -545,7 +551,7 @@ def main():
                 controller.apply_action(action, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]), time_in_decision=(now - last_decision_time))
 
             frames += 1
-            now = time.time()
+            now = time.perf_counter()
             if now - fps_timer >= 1.0:
                 fps = frames / (now - fps_timer)
                 frames = 0
@@ -578,9 +584,12 @@ def main():
             sys.stdout.write(hud)
             sys.stdout.flush()
 
-            elapsed = time.time() - loop_start
-            sleep_time = max(0.001, (1.0 / 120.0) - elapsed)
-            time.sleep(sleep_time)
+            target_tick = loop_start + (1.0 / 120.0)
+            remaining = target_tick - time.perf_counter()
+            if remaining > 0.002:
+                time.sleep(remaining - 0.0015)
+            while time.perf_counter() < target_tick:
+                pass
 
     except Exception as e:
         print(f"\n[-] Error in control loop: {e}")
