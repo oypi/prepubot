@@ -400,7 +400,7 @@ def main():
 
     if args.ipc:
         try:
-            run_ipc(driver, controller, initial_mode=initial_mode)
+            run_ipc(driver, controller)
         finally:
             controller.reset()
             controller.close()
