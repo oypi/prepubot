@@ -83,11 +83,11 @@ DIAGONAL_KICKOFF_SEQUENCE = np.array(
 )
 
 
-def run_ipc(driver, controller, initial_mode="GAMEPAD"):
+def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
     import json
     import select
 
-    active = False
+    active = initial_active
     focus_guard = False
     input_mode = initial_mode
     beta = 1.0
@@ -434,13 +434,14 @@ def main():
         sys.exit(1)
 
     pc_ptr = scanner.find_player_controller()
+    is_active = args.start_active
 
     # If in main menu (PlayerController not yet active in a match)
     if not pc_ptr:
         if args.ipc:
             import json
             import select
-            print(json.dumps({"type": "status", "state": "IN_MENU", "message": "In Main Menu"}), flush=True)
+            print(json.dumps({"type": "status", "state": "IN_MENU", "active": is_active, "message": "In Main Menu"}), flush=True)
             while not pc_ptr:
                 if not os.path.exists(f"/proc/{pid}"):
                     print(json.dumps({"type": "error", "message": "Rocket League process not running"}), flush=True)
@@ -452,13 +453,20 @@ def main():
                         return
                     try:
                         msg = json.loads(line.strip())
-                        if msg.get("cmd") == "quit":
+                        cmd = msg.get("cmd")
+                        if cmd == "start":
+                            is_active = True
+                        elif cmd == "stop":
+                            is_active = False
+                        elif cmd == "toggle":
+                            is_active = not is_active
+                        elif cmd == "quit":
                             return
                     except Exception:
                         pass
 
-                print(json.dumps({"type": "status", "state": "IN_MENU", "message": "In Main Menu"}), flush=True)
-                time.sleep(0.5)
+                print(json.dumps({"type": "status", "state": "IN_MENU", "active": is_active, "message": "In Main Menu"}), flush=True)
+                time.sleep(0.2)
                 try:
                     pc_ptr = scanner.find_player_controller()
                 except Exception:
@@ -490,7 +498,7 @@ def main():
 
     if args.ipc:
         try:
-            run_ipc(driver, controller)
+            run_ipc(driver, controller, initial_active=is_active)
         finally:
             controller.reset()
             controller.close()

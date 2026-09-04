@@ -326,7 +326,7 @@ impl PrepuBotApp {
                                         if telemetry.state == "IN_MENU" {
                                             s.connected = true;
                                             s.in_menu = true;
-                                            s.active = false;
+                                            s.active = telemetry.active;
                                             s.status_msg = telemetry.message.unwrap_or_else(|| "In Main Menu".to_string());
                                             s.permission_alert = None;
                                         } else {
@@ -641,6 +641,15 @@ impl eframe::App for PrepuBotApp {
                                         .background_color(egui::Color32::from_rgb(14, 32, 48))
                                         .strong(),
                                 );
+                                if active {
+                                    ui.label(
+                                        egui::RichText::new("[ ARMED ]")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(34, 197, 94))
+                                            .background_color(egui::Color32::from_rgb(14, 36, 24))
+                                            .strong(),
+                                    );
+                                }
                             } else {
                                 let (team_badge, team_bg, team_fg) = if team == 1 {
                                     ("[ ORANGE TEAM ]", egui::Color32::from_rgb(50, 25, 10), egui::Color32::from_rgb(255, 160, 60))
@@ -707,23 +716,41 @@ impl eframe::App for PrepuBotApp {
                                 )
                             }
                         }
-                        (true, true, _, _) => (
+                        (true, true, true, _) => (
+                            egui::Color32::from_rgb(16, 32, 28),
+                            egui::Color32::from_rgb(34, 197, 94),
+                            "[#] ENGAGED (ARMED IN MENU)",
+                            "PrepuBot is armed — Will drive automatically the moment match/car loads!",
+                        ),
+                        (true, true, false, _) => (
                             egui::Color32::from_rgb(14, 26, 36),
                             egui::Color32::from_rgb(56, 189, 248),
-                            "[~] IN MAIN MENU",
-                            "Rocket League active — Enter Freeplay or a Match to engage",
+                            "[~] IN MAIN MENU (STANDBY)",
+                            "PrepuBot disengaged — Press F6 or click Engage below to arm",
                         ),
-                        (true, false, _, "PAUSED") => (
+                        (true, false, true, "PAUSED") => (
                             egui::Color32::from_rgb(28, 29, 34),
-                            egui::Color32::from_rgb(115, 120, 132),
-                            "[||] GAME PAUSED",
-                            "In-game menu active — Inputs safely frozen",
+                            egui::Color32::from_rgb(234, 179, 8),
+                            "[||] GAME PAUSED (ARMED)",
+                            "Inputs safely frozen — Will resume playing instantly when unpaused",
                         ),
-                        (true, false, _, "OUT OF FOCUS") => (
+                        (true, false, false, "PAUSED") => (
+                            egui::Color32::from_rgb(24, 25, 29),
+                            egui::Color32::from_rgb(115, 120, 132),
+                            "[||] GAME PAUSED (DISENGAGED)",
+                            "Game paused — Autonomous standing by (Press F6 to arm)",
+                        ),
+                        (true, false, true, "OUT OF FOCUS") => (
                             egui::Color32::from_rgb(26, 27, 32),
                             egui::Color32::from_rgb(100, 105, 116),
                             "[-] WINDOW UNFOCUSED",
-                            "Rocket League in background — Autonomous idle",
+                            "Rocket League in background — Autonomous inputs idle",
+                        ),
+                        (true, false, false, "OUT OF FOCUS") => (
+                            egui::Color32::from_rgb(22, 23, 27),
+                            egui::Color32::from_rgb(75, 80, 92),
+                            "[-] WINDOW UNFOCUSED",
+                            "Autonomous disengaged — Focus Rocket League to play",
                         ),
                         (true, false, true, _) => (
                             egui::Color32::from_rgb(34, 36, 42),
@@ -762,13 +789,6 @@ impl eframe::App for PrepuBotApp {
                             egui::Color32::from_rgb(24, 25, 30),
                             egui::Color32::from_rgb(85, 90, 100),
                             egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 48)),
-                        )
-                    } else if in_menu {
-                        (
-                            "[ STANDING BY (IN MENU) ]",
-                            egui::Color32::from_rgb(16, 26, 36),
-                            egui::Color32::from_rgb(100, 160, 200),
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 60, 85)),
                         )
                     } else if active {
                         (

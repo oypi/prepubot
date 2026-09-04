@@ -315,12 +315,12 @@ class NextoDriver:
         except Exception:
             return None
 
-    def build_observation(self, car, ball, teammates=None, opponents=None, team=0, latency_comp=0.0035):
+    def build_observation(self, car, ball, teammates=None, opponents=None, team=0, latency_comp=0.002, latency_comp_ball=0.0):
         """
         Constructs Nexto's (q, kv, m) tensors in self-relative coordinate frame.
         Supports 1v1, 2v2, 3v3 and inverts the field by 180 deg when playing on Orange team (team == 1).
-        Applies dead-reckoning extrapolation (default 3.5ms) to compensate for memory-read,
-        inference, and controller-dispatch latency so Nexto's action arrives synchronously with game physics.
+        Applies gentle car latency compensation (2ms) for controller input dispatch,
+        while maintaining 100% exact ground-truth ball position (avoiding phantom ball displacement).
         """
         mate_list = [m for m in (teammates or []) if m is not None]
         opp_list = [o for o in (opponents or []) if o is not None]
@@ -349,26 +349,28 @@ class NextoDriver:
         kv = np.zeros((1, n_entities, 24), dtype=np.float32)
         m = np.zeros((1, n_entities), dtype=np.float32)
 
-        # Dead-reckoning extrapolation (x = x0 + v * dt)
+        # Car latency compensation (2ms forward projection for controller dispatch latency)
         if latency_comp > 0.0:
             car_pos = (car["pos"] + car["vel"] * latency_comp).copy()
             car_pos[0] = np.clip(car_pos[0], -4096.0, 4096.0)
             car_pos[1] = np.clip(car_pos[1], -5120.0, 5120.0)
             car_pos[2] = np.clip(car_pos[2], 17.0, 2048.0)
+        else:
+            car_pos = car["pos"]
 
-            ball_pos = (ball["pos"] + ball["vel"] * latency_comp).copy()
+        # Ball ground-truth position (Nexto's network was trained on exact unextrapolated ball positions)
+        if latency_comp_ball > 0.0:
+            ball_pos = (ball["pos"] + ball["vel"] * latency_comp_ball).copy()
             ball_vel = ball["vel"].copy()
             if ball_pos[2] > 95.0:
-                # Standard Rocket League gravity: -650 uu/s^2 along Z when airborne
-                ball_pos[2] += 0.5 * (-650.0) * (latency_comp ** 2)
-                ball_vel[2] += (-650.0) * latency_comp
+                ball_pos[2] += 0.5 * (-650.0) * (latency_comp_ball ** 2)
+                ball_vel[2] += (-650.0) * latency_comp_ball
             ball_pos[0] = np.clip(ball_pos[0], -4096.0, 4096.0)
             ball_pos[1] = np.clip(ball_pos[1], -5120.0, 5120.0)
             ball_pos[2] = np.clip(ball_pos[2], 92.75, 2048.0)
         else:
-            car_pos = car["pos"]
-            ball_pos = ball["pos"]
-            ball_vel = ball["vel"]
+            ball_pos = ball["pos"].copy()
+            ball_vel = ball["vel"].copy()
 
         def extrapolate_car_pos(c):
             if latency_comp <= 0.0 or c is None:
