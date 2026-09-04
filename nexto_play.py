@@ -171,6 +171,18 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
             kickoff_active = False
             action = np.zeros(8, dtype=np.int32)
             controller.reset()
+            # If entities are missing, check if player has returned to the main menu
+            if driver.pc_ptr:
+                try:
+                    active_pc = driver.reader.find_player_controller()
+                    if not active_pc:
+                        driver.pc_ptr = None
+                        driver.car_ptr = None
+                        driver.ball_ptr = None
+                        driver.mate_ptrs = []
+                        driver.opp_ptrs = []
+                except Exception:
+                    driver.pc_ptr = None
             is_in_menu = (driver.pc_ptr is None)
             telemetry = {
                 "type": "telemetry",
@@ -186,7 +198,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                 "action": "IN MENU" if is_in_menu else "GOAL / RESPAWN",
             }
             print(json.dumps(telemetry), flush=True)
-            time.sleep(0.01)
+            time.sleep(0.1 if is_in_menu else 0.01)
             continue
 
         car_spd = float(np.linalg.norm(car["vel"]))
@@ -515,7 +527,10 @@ def main():
                 action, car, ball = driver.step(beta=1.0)
                 if car is None or ball is None:
                     controller.reset()
-                    sys.stdout.write("\r[GOAL / RESPAWN] Waiting for kickoff...                          ")
+                    if driver.pc_ptr is None:
+                        sys.stdout.write("\r[IN MENU] Waiting for match / Freeplay...                         ")
+                    else:
+                        sys.stdout.write("\r[GOAL / RESPAWN] Waiting for kickoff...                          ")
                     sys.stdout.flush()
                     time.sleep(0.05)
                     continue
