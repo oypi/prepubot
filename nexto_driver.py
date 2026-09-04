@@ -168,23 +168,17 @@ class NextoDriver:
         if not target_ptr:
             return None
         try:
-            # Position from AActor::Location at 0x90 (proven correct Unreal coordinates)
-            self.mem.seek(target_ptr + 0x90)
-            x, y, z = struct.unpack("<fff", self.mem.read(12))
+            # Read contiguous 52-byte PhysX RBState at 0x5D0:
+            # 0x00: Quaternion (qx, qy, qz, qw)
+            # 0x10: Location (x, y, z)
+            # 0x1C: Velocity (vx, vy, vz)
+            # 0x28: Angular Velocity (wx, wy, wz)
+            self.mem.seek(target_ptr + 0x5D0)
+            raw = self.mem.read(52)
+            qx, qy, qz, qw, x, y, z, vx, vy, vz, wx, wy, wz = struct.unpack("<4f3f3f3f", raw)
             if abs(x) > 100000.0 or math.isnan(x):
                 return None
 
-            # Velocity from AActor::Velocity at 0x1A8
-            self.mem.seek(target_ptr + 0x1A8)
-            vx, vy, vz = struct.unpack("<fff", self.mem.read(12))
-
-            # Angular Velocity at 0x1C0
-            self.mem.seek(target_ptr + 0x1C0)
-            wx, wy, wz = struct.unpack("<fff", self.mem.read(12))
-
-            # Orientation from PhysX quaternion at car + 0x5D0
-            self.mem.seek(target_ptr + 0x5D0)
-            qx, qy, qz, qw = struct.unpack("<ffff", self.mem.read(16))
             s = 1.0 / max(1e-6, qx*qx + qy*qy + qz*qz + qw*qw)
             fw = np.array([
                 1.0 - 2.0 * s * (qy * qy + qz * qz),
@@ -293,19 +287,16 @@ class NextoDriver:
         if not self.ball_ptr:
             return None
         try:
-            # Position from AActor::Location at 0x90 (proven correct Unreal coordinates)
-            self.mem.seek(self.ball_ptr + 0x90)
-            x, y, z = struct.unpack("<fff", self.mem.read(12))
+            # Read contiguous 52-byte PhysX RBState at 0x5D0 (atomic simulation state):
+            # 0x00: Quaternion (qx, qy, qz, qw)
+            # 0x10: Location (x, y, z)
+            # 0x1C: Velocity (vx, vy, vz)
+            # 0x28: Angular Velocity (wx, wy, wz)
+            self.mem.seek(self.ball_ptr + 0x5D0)
+            raw = self.mem.read(52)
+            _, _, _, _, x, y, z, vx, vy, vz, wx, wy, wz = struct.unpack("<4f3f3f3f", raw)
             if abs(x) > 100000.0 or math.isnan(x):
                 return None
-
-            # Velocity from AActor::Velocity at 0x1A8
-            self.mem.seek(self.ball_ptr + 0x1A8)
-            vx, vy, vz = struct.unpack("<fff", self.mem.read(12))
-
-            # Angular Velocity at 0x1C0
-            self.mem.seek(self.ball_ptr + 0x1C0)
-            wx, wy, wz = struct.unpack("<fff", self.mem.read(12))
 
             return {
                 "pos": np.array([x, y, z], dtype=np.float32),
@@ -315,12 +306,12 @@ class NextoDriver:
         except Exception:
             return None
 
-    def build_observation(self, car, ball, teammates=None, opponents=None, team=0, latency_comp=0.002, latency_comp_ball=0.0):
+    def build_observation(self, car, ball, teammates=None, opponents=None, team=0, latency_comp=0.0, latency_comp_ball=0.0):
         """
         Constructs Nexto's (q, kv, m) tensors in self-relative coordinate frame.
         Supports 1v1, 2v2, 3v3 and inverts the field by 180 deg when playing on Orange team (team == 1).
-        Applies gentle car latency compensation (2ms) for controller input dispatch,
-        while maintaining 100% exact ground-truth ball position (avoiding phantom ball displacement).
+        Uses pure ground-truth PhysX simulation coordinates (zero latency compensation offset)
+        to ensure exact, sub-millimeter ball-balancing and dribble stability on the car's roof.
         """
         mate_list = [m for m in (teammates or []) if m is not None]
         opp_list = [o for o in (opponents or []) if o is not None]
@@ -329,12 +320,13 @@ class NextoDriver:
         # opponent parked in the opposing half so Nexto's transformer always
         # receives its native 1v1 input format.
         if len(opp_list) == 0 and len(mate_list) == 0:
-            opp_y = -5120.0 if team == 0 else 5120.0
+            opp_y = 5120.0 if team == 0 else -5120.0
+            opp_fw_y = -1.0 if team == 0 else 1.0
             dummy_opp = {
                 "pos": np.array([0.0, opp_y, 17.0], dtype=np.float32),
                 "vel": np.zeros(3, dtype=np.float32),
                 "ang_vel": np.zeros(3, dtype=np.float32),
-                "fw": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                "fw": np.array([0.0, opp_fw_y, 0.0], dtype=np.float32),
                 "up": np.array([0.0, 0.0, 1.0], dtype=np.float32),
                 "boost": 0.0,
                 "on_ground": 1.0,
@@ -349,7 +341,7 @@ class NextoDriver:
         kv = np.zeros((1, n_entities, 24), dtype=np.float32)
         m = np.zeros((1, n_entities), dtype=np.float32)
 
-        # Car latency compensation (2ms forward projection for controller dispatch latency)
+        # Ground-truth car and ball states (pure unextrapolated PhysX coordinates)
         if latency_comp > 0.0:
             car_pos = (car["pos"] + car["vel"] * latency_comp).copy()
             car_pos[0] = np.clip(car_pos[0], -4096.0, 4096.0)
@@ -358,7 +350,6 @@ class NextoDriver:
         else:
             car_pos = car["pos"]
 
-        # Ball ground-truth position (Nexto's network was trained on exact unextrapolated ball positions)
         if latency_comp_ball > 0.0:
             ball_pos = (ball["pos"] + ball["vel"] * latency_comp_ball).copy()
             ball_vel = ball["vel"].copy()
@@ -369,8 +360,8 @@ class NextoDriver:
             ball_pos[1] = np.clip(ball_pos[1], -5120.0, 5120.0)
             ball_pos[2] = np.clip(ball_pos[2], 92.75, 2048.0)
         else:
-            ball_pos = ball["pos"].copy()
-            ball_vel = ball["vel"].copy()
+            ball_pos = ball["pos"]
+            ball_vel = ball["vel"]
 
         def extrapolate_car_pos(c):
             if latency_comp <= 0.0 or c is None:
