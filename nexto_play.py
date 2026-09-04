@@ -84,30 +84,30 @@ DIAGONAL_KICKOFF_SEQUENCE = np.array(
     dtype=np.float32
 )
 
-# 2. Straight Center speedflip kickoff sequence (176 ticks @ 120Hz = 1.46s)
-# Starts at X=0, Y=±4608. Micro-steers right, diagonal flips left, cancels & powerslides on center line.
+# 2. Straight Center Consistent Fast Kickoff (160 ticks @ 120Hz = 1.33s)
+# 100% consistent, perfectly straight line into center ball
 CENTER_KICKOFF_SEQUENCE = np.array(
-    13 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost straight
-    + 3 * 4 * [[1.0,  0.8,  0.0,  0.0,  0.0, 0, 1, 0]]  # Micro-steer right (10° off-axis)
-    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
-    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
-    + 1 * 4 * [[1.0,  0.0, -0.7, -0.7,  0.0, 1, 1, 0]]  # Diagonal flip left (towards center line)
-    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
-    + 9 * 4 * [[1.0,  0.0,  0.3,  0.0, -1.0, 0, 0, 1]]  # Air roll left to level wheels + powerslide landing
-    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]], # Drive & boost straight into 50-50
+    13 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost straight over first pad (0.43s)
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # Jump with boost
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Jump release
+    + 1 * 4 * [[1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0]]  # Front dodge (cut boost so car doesn't boost backwards)
+    + 7 * 4 * [[1.0,  0.0, -1.0,  0.0,  0.0, 0, 0, 0]]  # Complete forward rotation
+    + 8 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 1]]  # Wheels touchdown holding powerslide + boost (supersonic 2200 uu/s)
+    + 8 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]], # Straight supersonic sprint into 50-50
     dtype=np.float32
 )
 
-# 3. Off-Center speedflip kickoff sequence (168 ticks @ 120Hz = 1.40s)
-# Base is Off-Center Left (X=-256). Steers outward left, diagonal flips inward right toward (0,0), cancels & powerslides on line.
+# 3. Off-Center Consistent Fast Kickoff (152 ticks @ 120Hz = 1.27s)
+# Base is Off-Center Left (X=-256). Steers 3.8° inward toward (0,0), front-flips directly through center.
 OFFCENTER_KICKOFF_SEQUENCE = np.array(
-    12 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
-    + 3 * 4 * [[1.0, -0.6,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly outward
-    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
-    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
-    + 1 * 4 * [[1.0,  0.0, -0.7,  0.75, 0.0, 1, 1, 0]]  # Diagonal flip inward towards ball
-    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
-    + 10 * 4 * [[1.0,  0.0,  0.4,  0.0,  1.0, 0, 0, 1]], # Air roll recovery + powerslide landing
+    4 * 4 * [[1.0,  0.25, 0.0,  0.0,  0.0, 0, 1, 0]]  # Steer 3.8° inward toward ball center
+    + 7 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost straight on new heading
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # Jump with boost
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Jump release
+    + 1 * 4 * [[1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0]]  # Front dodge
+    + 7 * 4 * [[1.0,  0.0, -1.0,  0.0,  0.0, 0, 0, 0]]  # Complete forward rotation
+    + 8 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 1]]  # Powerslide landing + boost
+    + 8 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]], # Supersonic sprint into ball
     dtype=np.float32
 )
 
@@ -280,21 +280,19 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                             # 1. Diagonal kickoff slot (X ≈ ±2048)
                             current_kickoff_seq = DIAGONAL_KICKOFF_SEQUENCE
                             kickoff_mirror = is_spawn_left
-                            kickoff_type = "DIAGONAL"
+                            kickoff_type = "SPEEDFLIP DIAG"
                             kickoff_active = True
                         elif abs_x >= 50.0:
-                            # 2. Off-center kickoff slot (X ≈ ±256)
-                            # Base sequence is Left spawn (outward left steer, inward right flip).
-                            # If spawning on Right, mirror it.
+                            # 2. Off-center kickoff slot (X ≈ ±256) - Consistent Fast Kickoff
                             current_kickoff_seq = OFFCENTER_KICKOFF_SEQUENCE
                             kickoff_mirror = not is_spawn_left
-                            kickoff_type = "OFF-CENTER"
+                            kickoff_type = "FAST OFF-CENTER"
                             kickoff_active = True
                         else:
-                            # 3. Straight center kickoff slot (X ≈ 0)
+                            # 3. Straight center kickoff slot (X ≈ 0) - Consistent Fast Kickoff
                             current_kickoff_seq = CENTER_KICKOFF_SEQUENCE
                             kickoff_mirror = False
-                            kickoff_type = "CENTER"
+                            kickoff_type = "FAST CENTER"
                             kickoff_active = True
 
                         if kickoff_active:
@@ -312,7 +310,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                         raw_act[3] = -raw_act[3]  # Invert yaw
                         raw_act[4] = -raw_act[4]  # Invert roll
                     action = raw_act
-                    act_str = f"SPEEDFLIP {kickoff_type} [{kickoff_tick + 1}/{len(current_kickoff_seq)}]"
+                    act_str = f"KICKOFF {kickoff_type} [{kickoff_tick + 1}/{len(current_kickoff_seq)}]"
                 else:
                     kickoff_active = False
 
