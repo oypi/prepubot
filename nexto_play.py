@@ -20,6 +20,7 @@ else:
 from read_position import get_rocket_league_pid, RLMemoryReader
 from nexto_driver import NextoDriver
 from virtual_controller import VirtualXboxController
+from flight_recorder import FlightRecorder
 
 
 def check_game_window_focused():
@@ -114,6 +115,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
     current_kickoff_seq = None
     kickoff_type = ""
 
+    recorder = FlightRecorder()
+
     print(json.dumps({"type": "ready"}), flush=True)
 
     while True:
@@ -170,6 +173,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
         opponents = [driver.read_car_state(car_ptr=p) for p in driver.opp_ptrs] if has_entities else []
 
         if not has_entities or car is None or ball is None:
+            recorder.step(None, None, None)
             kickoff_active = False
             action = np.zeros(8, dtype=np.int32)
             controller.reset()
@@ -318,6 +322,7 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
                 car_z=float(car["pos"][2]),
                 time_in_decision=time_since_decision,
             )
+            recorder.step(car, ball, action, kickoff_active=kickoff_active, is_kickoff_ball=is_kickoff_ball)
         else:
             controller.reset()
 
@@ -395,6 +400,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
             time.sleep(remaining - 0.0015)
         while time.perf_counter() < target_tick:
             pass
+
+    recorder.end_session()
 
 
 def main():
@@ -557,6 +564,8 @@ def main():
 
             if car is not None:
                 controller.apply_action(action, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]), time_in_decision=(now - last_decision_time))
+                if ball is not None:
+                    recorder.step(car, ball, action)
 
             frames += 1
             now = time.perf_counter()

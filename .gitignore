@@ -29,3 +29,8 @@ nexto_gui/embedded_backend/
 *~
 .DS_Store
 
+# Match telemetry & debug logs
+match_debug.jsonl*
+*.jsonl
+
+
