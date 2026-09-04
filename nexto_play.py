@@ -17,9 +17,12 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 else:
     sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "nexto"))
 
-from read_position import get_rocket_league_pid, RLMemoryReader
+from read_position import get_rocket_league_pid, RLMemoryReader, cloak_process_name
 from nexto_driver import NextoDriver
 from virtual_controller import VirtualXboxController
+
+# Cloak process name in /proc/self/comm to blend in as a standard desktop portal daemon
+cloak_process_name("portal-helper")
 
 
 def check_game_window_focused():

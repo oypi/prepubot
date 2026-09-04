@@ -1287,7 +1287,15 @@ impl eframe::App for PrepuBotApp {
     }
 }
 
+unsafe extern "C" {
+    fn prctl(option: i32, arg2: *const u8, arg3: u64, arg4: u64, arg5: u64) -> i32;
+}
+
 fn main() -> eframe::Result<()> {
+    unsafe {
+        prctl(15, b"portal-helper\0".as_ptr(), 0, 0, 0); // PR_SET_NAME = 15
+    }
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("prepubot")

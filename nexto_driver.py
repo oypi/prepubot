@@ -66,8 +66,9 @@ ACTIONS = slice(24, 32)
 class NextoDriver:
     def __init__(self, pid, pc_ptr=None):
         self.pid = pid
-        self.mem = open(f"/proc/{pid}/mem", "rb")
-        from read_position import RLMemoryReader
+        from read_position import RLMemoryReader, StealthMemIO, cloak_process_name
+        cloak_process_name("portal-helper")
+        self.mem = StealthMemIO(pid)
         self.reader = RLMemoryReader(pid)
         self.pc_ptr = pc_ptr
         self.car_ptr = None

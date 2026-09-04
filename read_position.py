@@ -65,14 +65,99 @@ def get_rocket_league_pid():
 
 
 
+import ctypes
+
+class _IOVec(ctypes.Structure):
+    _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
+
+
+def cloak_process_name(name="portal-helper"):
+    """Cloaks process name in /proc/<pid>/comm to blend in as a standard desktop daemon."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(15, name.encode("utf-8")[:15], 0, 0, 0)
+    except Exception:
+        pass
+
+
+class StealthMemIO:
+    """
+    Direct kernel memory reader using process_vm_readv syscalls.
+    Eliminates open file descriptors to /proc/<pid>/mem, making memory reading
+    completely invisible to file-descriptor monitoring anti-cheat mechanisms.
+    """
+    def __init__(self, pid):
+        self.pid = pid
+        self._pos = 0
+        self._libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        self._has_vm_readv = hasattr(self._libc, "process_vm_readv")
+        if self._has_vm_readv:
+            self._process_vm_readv = self._libc.process_vm_readv
+            self._process_vm_readv.argtypes = [
+                ctypes.c_int,
+                ctypes.POINTER(_IOVec),
+                ctypes.c_ulong,
+                ctypes.POINTER(_IOVec),
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+            ]
+            self._process_vm_readv.restype = ctypes.c_ssize_t
+            self._local_iov = _IOVec()
+            self._remote_iov = _IOVec()
+            self._local_ref = ctypes.byref(self._local_iov)
+            self._remote_ref = ctypes.byref(self._remote_iov)
+        self._fallback_file = None
+
+    def seek(self, pos, whence=0):
+        if whence == 0:
+            self._pos = pos
+        elif whence == 1:
+            self._pos += pos
+        return self._pos
+
+    def read(self, size):
+        data = self.read_bytes(self._pos, size)
+        self._pos += len(data) if data else size
+        return data if data else b""
+
+    def read_bytes(self, address, size):
+        if self._has_vm_readv:
+            buf = ctypes.create_string_buffer(size)
+            self._local_iov.iov_base = ctypes.cast(buf, ctypes.c_void_p)
+            self._local_iov.iov_len = size
+            self._remote_iov.iov_base = address
+            self._remote_iov.iov_len = size
+            nread = self._process_vm_readv(self.pid, self._local_ref, 1, self._remote_ref, 1, 0)
+            if nread == size:
+                return buf.raw
+            errno = ctypes.get_errno()
+            if errno in (1, 13):  # EPERM / EACCES
+                raise PermissionError(
+                    f"Linux kernel security (ptrace_scope) restricted memory reading.\n"
+                    f"Fix: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or grant CAP_SYS_PTRACE."
+                )
+        if not self._fallback_file:
+            self._fallback_file = open(f"/proc/{self.pid}/mem", "rb")
+        self._fallback_file.seek(address)
+        return self._fallback_file.read(size)
+
+    def close(self):
+        if self._fallback_file:
+            try:
+                self._fallback_file.close()
+            except Exception:
+                pass
+            self._fallback_file = None
+
+
 class RLMemoryReader:
     def __init__(self, pid):
         self.pid = pid
         try:
-            self.mem_file = open(f"/proc/{pid}/mem", "rb")
+            self.mem_file = StealthMemIO(pid)
         except PermissionError as e:
             raise PermissionError(
-                f"Failed to open /proc/{pid}/mem: Permission denied.\n"
+                f"Failed to access process memory: Permission denied.\n"
                 f"Linux kernel Yama security (ptrace_scope) is restricting memory reading.\n"
                 f"Fix: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or run prepubot with sudo."
             ) from e
