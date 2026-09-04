@@ -69,9 +69,11 @@ def check_game_window_focused():
     return True
 
 
-# Precomputed official Nexto speedflip kickoff sequence (168 ticks @ 120Hz = 1.40s)
+# Precomputed 120Hz speedflip kickoff sequences for all 5 Rocket League kickoff slots
 # action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
-KICKOFF_SEQUENCE = np.array(
+
+# 1. Diagonal speedflip kickoff sequence (168 ticks @ 120Hz = 1.40s)
+DIAGONAL_KICKOFF_SEQUENCE = np.array(
     11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
     + 4 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly left
     + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
@@ -79,6 +81,33 @@ KICKOFF_SEQUENCE = np.array(
     + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.0, 1, 1, 0]]  # Diagonal flip right
     + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
     + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery
+    dtype=np.float32
+)
+
+# 2. Straight Center speedflip kickoff sequence (176 ticks @ 120Hz = 1.46s)
+# Starts at X=0, Y=±4608. Micro-steers right, diagonal flips left, cancels & powerslides on center line.
+CENTER_KICKOFF_SEQUENCE = np.array(
+    13 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost straight
+    + 3 * 4 * [[1.0,  0.8,  0.0,  0.0,  0.0, 0, 1, 0]]  # Micro-steer right (10° off-axis)
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
+    + 1 * 4 * [[1.0,  0.0, -0.7, -0.7,  0.0, 1, 1, 0]]  # Diagonal flip left (towards center line)
+    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
+    + 9 * 4 * [[1.0,  0.0,  0.3,  0.0, -1.0, 0, 0, 1]]  # Air roll left to level wheels + powerslide landing
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]], # Drive & boost straight into 50-50
+    dtype=np.float32
+)
+
+# 3. Off-Center speedflip kickoff sequence (168 ticks @ 120Hz = 1.40s)
+# Base is Off-Center Left (X=-256). Steers outward left, diagonal flips inward right toward (0,0), cancels & powerslides on line.
+OFFCENTER_KICKOFF_SEQUENCE = np.array(
+    12 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
+    + 3 * 4 * [[1.0, -0.6,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly outward
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
+    + 1 * 4 * [[1.0,  0.0, -0.7,  0.75, 0.0, 1, 1, 0]]  # Diagonal flip inward towards ball
+    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
+    + 10 * 4 * [[1.0,  0.0,  0.4,  0.0,  1.0, 0, 0, 1]], # Air roll recovery + powerslide landing
     dtype=np.float32
 )
 
@@ -111,6 +140,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
     kickoff_tick = 0
     kickoff_start_time = 0.0
     kickoff_mirror = False
+    current_kickoff_seq = None
+    kickoff_type = ""
 
     print(json.dumps({"type": "ready"}), flush=True)
 
@@ -238,27 +269,50 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                         act_str = "KICKOFF READY"
                     else:
                         # Countdown ended, car is moving:
-                        # Only use hardcoded speedflip for DIAGONAL kickoff slots (abs(x) > 1500)
-                        # Center and off-center spawns let Nexto's neural net handle it (beta=0.5)
-                        if abs(car["pos"][0]) > 1500.0:
+                        # Select optimal speedflip sequence based on car's kickoff spawn slot
+                        car_x = float(car["pos"][0])
+                        abs_x = abs(car_x)
+                        # For Blue (team 0): left is x < 0, right is x > 0
+                        # For Orange (team 1): left is x > 0, right is x < 0
+                        is_spawn_left = (car_x < 0.0) if driver.team == 0 else (car_x > 0.0)
+
+                        if abs_x > 1000.0:
+                            # 1. Diagonal kickoff slot (X ≈ ±2048)
+                            current_kickoff_seq = DIAGONAL_KICKOFF_SEQUENCE
+                            kickoff_mirror = is_spawn_left
+                            kickoff_type = "DIAGONAL"
                             kickoff_active = True
+                        elif abs_x >= 50.0:
+                            # 2. Off-center kickoff slot (X ≈ ±256)
+                            # Base sequence is Left spawn (outward left steer, inward right flip).
+                            # If spawning on Right, mirror it.
+                            current_kickoff_seq = OFFCENTER_KICKOFF_SEQUENCE
+                            kickoff_mirror = not is_spawn_left
+                            kickoff_type = "OFF-CENTER"
+                            kickoff_active = True
+                        else:
+                            # 3. Straight center kickoff slot (X ≈ 0)
+                            current_kickoff_seq = CENTER_KICKOFF_SEQUENCE
+                            kickoff_mirror = False
+                            kickoff_type = "CENTER"
+                            kickoff_active = True
+
+                        if kickoff_active:
                             kickoff_tick = 0
                             kickoff_start_time = now
-                            kickoff_mirror = (car["pos"][0] < -50.0) if driver.team == 0 else (car["pos"][0] > 50.0)
-                        # else: fall through to neural net kickoff below
 
-            if kickoff_active:
+            if kickoff_active and current_kickoff_seq is not None:
                 # Advance kickoff_tick by elapsed physics time (120 Hz) instead of per-loop
                 ticks_elapsed = int((now - kickoff_start_time) * 120.0)
-                kickoff_tick = min(ticks_elapsed, len(KICKOFF_SEQUENCE))
-                if kickoff_tick < len(KICKOFF_SEQUENCE):
-                    raw_act = KICKOFF_SEQUENCE[kickoff_tick].copy()
+                kickoff_tick = min(ticks_elapsed, len(current_kickoff_seq))
+                if kickoff_tick < len(current_kickoff_seq):
+                    raw_act = current_kickoff_seq[kickoff_tick].copy()
                     if kickoff_mirror:
                         raw_act[1] = -raw_act[1]  # Invert steer
                         raw_act[3] = -raw_act[3]  # Invert yaw
                         raw_act[4] = -raw_act[4]  # Invert roll
                     action = raw_act
-                    act_str = f"SPEEDFLIP [{kickoff_tick + 1}/{len(KICKOFF_SEQUENCE)}]"
+                    act_str = f"SPEEDFLIP {kickoff_type} [{kickoff_tick + 1}/{len(current_kickoff_seq)}]"
                 else:
                     kickoff_active = False
 
@@ -275,8 +329,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD"):
                     action = np.zeros(8, dtype=np.int32)
                     act_str = "OUT OF FOCUS"
                 elif active:
-                    # Use beta=0.5 during non-diagonal kickoffs for stochastic neural net play
-                    kickoff_beta = 0.5 if (is_kickoff_ball and dist_to_ball > 1000.0) else beta
+                    # When Nexto takes over after the speedflip, use deterministic greedy play (beta=1.0)
+                    kickoff_beta = 1.0 if (is_kickoff_ball and dist_to_ball > 800.0) else beta
                     q, kv, m = driver.build_observation(car, ball, teammates=mates, opponents=opponents, team=driver.team)
                     action, _ = driver.agent.act((q, kv, m), beta=kickoff_beta)
                     driver.prev_action = np.array(action, dtype=np.float32)
