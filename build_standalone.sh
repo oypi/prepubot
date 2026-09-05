@@ -37,7 +37,7 @@ echo "[2/4] Bundling Nexto Python backend into standalone executable..."
     --name nexto_backend \
     --distpath "$EMBEDDED_DIR" \
     --workpath /tmp/build_prepubot \
-    --add-data "$SCRIPT_DIR/nexto:nexto" \
+    --add-data "$SCRIPT_DIR/RLMarlbot:RLMarlbot" \
     --exclude-module matplotlib \
     --exclude-module scipy \
     --exclude-module pandas \

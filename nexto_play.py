@@ -17,14 +17,15 @@ import select
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     sys.path.insert(0, sys._MEIPASS)
-    sys.path.insert(0, os.path.join(sys._MEIPASS, "nexto"))
+    sys.path.insert(0, os.path.join(sys._MEIPASS, "RLMarlbot"))
+    sys.path.insert(0, os.path.join(sys._MEIPASS, "RLMarlbot", "rlmarlbot"))
 else:
-    sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "nexto"))
+    sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "RLMarlbot"))
+    sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), "RLMarlbot", "rlmarlbot"))
 
 from read_position import get_rocket_league_pid, RLMemoryReader, cloak_process_name
 from nexto_driver import NextoDriver
 from virtual_controller import VirtualXboxController
-from memory_controller import MemoryController
 from models_manager import BotModelManager
 
 # Cloak process name in /proc/self/comm to blend in as a standard desktop portal daemon
@@ -306,7 +307,7 @@ def main():
     parser.add_argument("--ipc", action="store_true", help="Run in JSON IPC mode for GUI integration")
     parser.add_argument("--start-active", action="store_true", help="Start playing immediately in IPC mode")
     parser.add_argument("--bot", type=str, default="nexto", choices=["nexto", "seer", "element"], help="Bot AI model (default: nexto)")
-    parser.add_argument("--mode", type=str, default="uinput", choices=["uinput", "memory"], help="Input mode: 'uinput' (virtual gamepad, safe and stable) or 'memory' (direct process_vm_writev)")
+    parser.add_argument("--mode", type=str, default="uinput", help="Input mode (default: uinput)")
     args = parser.parse_args()
 
     pid = get_rocket_league_pid()
@@ -326,18 +327,15 @@ def main():
             print(f"\n[!] {e}\n")
         sys.exit(1)
 
-    mode_str = "DIRECT MEMORY" if args.mode == "memory" else "GAMEPAD"
-    if args.mode == "memory":
-        controller = MemoryController(pid=pid)
-    else:
-        try:
-            controller = VirtualXboxController()
-        except Exception as e:
-            if args.ipc:
-                print(json.dumps({"type": "error", "message": "UINPUT_DENIED", "details": "Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput"}), flush=True)
-            else:
-                print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
-            sys.exit(1)
+    mode_str = "GAMEPAD"
+    try:
+        controller = VirtualXboxController()
+    except Exception as e:
+        if args.ipc:
+            print(json.dumps({"type": "error", "message": "UINPUT_DENIED", "details": "Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput"}), flush=True)
+        else:
+            print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
+        sys.exit(1)
 
     pc_ptr = scanner.find_player_controller()
     is_active = args.start_active

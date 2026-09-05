@@ -11,9 +11,12 @@ import numpy as np
 import torch
 
 try:
-    from nexto.agent import Agent
+    from rlmarlbot.nexto.agent import Agent
 except ImportError:
-    from agent import Agent
+    try:
+        from nexto.agent import Agent
+    except ImportError:
+        Agent = None
 
 # Standard Rocket League boost pad positions (34 pads in standard arena)
 BOOST_LOCATIONS = np.array([
@@ -79,7 +82,7 @@ class NextoDriver:
         self.last_opp_scan = 0.0
         self.car_air_times = {}
         self.car_last_state_time = {}
-        self.agent = Agent()
+        self.agent = Agent() if Agent is not None else None
         self.prev_action = np.zeros(8, dtype=np.float32)
         self.norm = np.array([1.0] * 5 + [2300.0] * 6 + [1.0] * 6 + [5.5] * 3 + [1.0] * 4, dtype=np.float32)
         self.boost_timers = np.zeros(34, dtype=np.float32)

@@ -13,16 +13,16 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
   - Reads player car coordinates, velocity, angular velocity, and PhysX rotation quaternion (`0x5D0`).
   - Tracks ball physics and dynamically discovers teammate/opponent cars.
   - Ground contact and double jump flags via `Vehicle_TA` flags (`0x7F8`).
-- **Nexto Transformer Integration (`nexto_driver.py`)**:
-  - Constructs `(q, kv, m)` attention tensors in a self-relative coordinate frame identical to official `NextoObsBuilder`.
-  - Full support for 1v1, 2v2, and 3v3 matches, including 180° field inversion for Orange team.
-  - Runs Nexto TorchScript model (`nexto/nexto-model.pt`) with configurable temperature (`beta`).
+- **Multi-Bot Model Manager (`models_manager.py`)**:
+  - Seamless in-game hot-switching between **Nexto**, **Seer**, and **Element**.
+  - Direct translation from memory state packets to RLBot GameTickPackets.
+  - Configurable Nexto temperature (`beta`), flip cancel tuning, and team inversion.
 - **Input Emulation (`virtual_controller.py`)**:
   - Emulates a hardware-level Microsoft Xbox 360 controller using Linux `/dev/uinput`.
   - Continuous analog triggers for throttle and brake (`RT`/`LT`), left stick for steering, yaw, and pitch.
-  - Directional flip mapping for dodges and aerial maneuvers.
+  - Dodge/flip clamping to eliminate side flips during ground driving and aerial contests.
 - **Autonomous Play & Kickoffs (`nexto_play.py`)**:
-  - Physics-synchronized 120Hz polling with 15 Hz decision intervals (`tick_skip = 8`).
+  - Physics-synchronized 120Hz polling with frame-accurate controller input updates.
   - Automated kickoff detection: frame-accurate speedflip sequences for diagonal spawns and neural net play for central kickoffs.
   - Window focus guard: automatically pauses inputs when Rocket League loses focus (supports Niri, Hyprland, Sway, KDE, GNOME, and X11).
   - Bi-directional JSON IPC protocol for external frontends.
@@ -30,24 +30,21 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
   - Clean cyberpunk dark-mode GUI built with `egui` and `eframe`.
   - Live HUD displaying car speed, boost percentage, ball distance, current action, teammate/opponent status, and FPS.
   - Global background hotkey thread listening for **F6** across all raw input devices.
-  - Controls for window focus guard, and window pin (always on top).
+  - Bot selector dropdown (Nexto / Seer / Element), window focus guard, and window pin (always on top).
 
 ---
 
 ## Repository Structure
 
 ```
-├── nexto/                 # Nexto neural network assets
-│   ├── nexto-model.pt     # TorchScript model weights
-│   ├── agent.py           # Action lookup table and model runner
-│   └── nexto_obs.py       # Reference observation builder specification
-├── nexto_gui/             # Rust desktop HUD & launcher
-│   ├── Cargo.toml         # Rust package manifest (eframe, serde, evdev)
-│   └── src/main.rs        # GUI application, telemetry receiver, hotkey listener
+├── models_manager.py      # Multi-model bot manager (Nexto, Seer, Element)
 ├── nexto_driver.py        # Observation builder and memory state bridge
-├── nexto_play.py          # Bot runner, decision scheduler, kickoff sequencer, IPC
-├── read_position.py       # Unreal Engine memory reflection & scanner
-└── virtual_controller.py  # evdev /dev/uinput Xbox 360 virtual controller
+├── nexto_gui/             # Rust desktop HUD & launcher (eframe, egui)
+├── nexto_play.py          # Main bot runner, 120 Hz tick loop, IPC daemon
+├── read_position.py       # Unreal Engine memory scanner (process_vm_readv)
+├── virtual_controller.py  # evdev /dev/uinput Xbox 360 virtual controller
+├── RLMarlbot/             # Bot models, neural weights, and Linux SDK adapters
+└── build_standalone.sh    # Script to bundle everything into a single binary
 ```
 
 ---
