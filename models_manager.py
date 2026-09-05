@@ -52,6 +52,9 @@ class BotModelManager:
         self.start_time = time.perf_counter()
         self.last_packet: Optional[GameTickPacket] = None
         self.last_action = [0.0] * 8
+        self.boost_timers = np.zeros(34, dtype=np.float32)
+        self.last_boost_time = time.perf_counter()
+        self.prev_car_boost = 0.33
 
         self._init_bot()
 
@@ -209,14 +212,58 @@ class BotModelManager:
 
         # Boost Pads
         packet.num_boost = 34
+        effective_timers = self.boost_timers
+        if boost_timers is not None and np.any(boost_timers > 0.0):
+            effective_timers = np.maximum(effective_timers, boost_timers[:34])
+
         for i in range(34):
-            timer = float(boost_timers[i]) if i < len(boost_timers) else 0.0
+            timer = float(effective_timers[i]) if i < len(effective_timers) else 0.0
             packet.game_boosts[i].is_active = bool(timer <= 0.0)
             packet.game_boosts[i].timer = max(0.0, timer)
 
         return packet
 
-    def step(self, car_state: dict, ball_state: dict, mates: list, opps: list, boost_timers: np.ndarray) -> SimpleControllerState:
+    def update_boost_timers(self, car_state: dict, mates: list, opps: list, is_kickoff: bool):
+        now = time.perf_counter()
+        dt = min(max(now - self.last_boost_time, 0.001), 0.25)
+        self.last_boost_time = now
+        self.boost_timers = np.maximum(0.0, self.boost_timers - dt)
+
+        if is_kickoff:
+            self.boost_timers.fill(0.0)
+            return
+
+        # 1. Detect self car boost increase (collected a pad)
+        cur_boost = float(car_state.get("boost", 0.0))
+        if cur_boost > self.prev_car_boost + 0.03:
+            c_pos = car_state["pos"]
+            dists = np.linalg.norm(BOOST_LOCATIONS - c_pos, axis=1)
+            closest_idx = int(np.argmin(dists))
+            if dists[closest_idx] < 260.0:
+                is_big = bool(BOOST_LOCATIONS[closest_idx, 2] > 72.0)
+                self.boost_timers[closest_idx] = 10.0 if is_big else 4.0
+        self.prev_car_boost = cur_boost
+
+        # 2. Check proximity for all active cars on pitch
+        all_cars = [car_state] + [m for m in mates if m is not None] + [o for o in opps if o is not None]
+        for c in all_cars:
+            if not isinstance(c, dict) or "pos" not in c:
+                continue
+            c_pos = c["pos"]
+            dists = np.linalg.norm(BOOST_LOCATIONS - c_pos, axis=1)
+            collected_indices = np.where((dists < 185.0) & (self.boost_timers <= 0.0))[0]
+            for idx in collected_indices:
+                is_big = bool(BOOST_LOCATIONS[idx, 2] > 72.0)
+                self.boost_timers[idx] = 10.0 if is_big else 4.0
+
+    def step(self, car_state: dict, ball_state: dict, mates: list, opps: list, boost_timers: np.ndarray = None) -> SimpleControllerState:
+        b_pos = ball_state.get("pos", [0.0, 0.0, 0.0])
+        b_vel = ball_state.get("vel", [0.0, 0.0, 0.0])
+        ball_dist_center = float(np.linalg.norm(b_pos[:2]))
+        ball_spd = float(np.linalg.norm(b_vel))
+        is_kickoff = (ball_dist_center < 35.0 and ball_spd < 50.0)
+
+        self.update_boost_timers(car_state, mates, opps, is_kickoff)
         packet = self.build_packet(car_state, ball_state, mates, opps, boost_timers)
         self.last_packet = packet
 

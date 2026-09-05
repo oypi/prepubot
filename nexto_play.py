@@ -79,16 +79,19 @@ def check_game_window_focused():
     return True
 
 
-# Frame-accurate speedflip kickoff sequence from Nexto (168 ticks @ 120Hz = 1.40s)
+# Frame-accurate speedflip kickoff sequence from Nexto (164 ticks @ 120Hz = 1.37s)
 # action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+# Base sequence is calibrated for LEFT diagonal spawn:
+# drives forward, steers slightly away (left), jumps, diagonal dodges towards ball (right),
+# cancels flip immediately, recovers roll to land flat.
 DIAGONAL_KICKOFF_SEQUENCE = np.array(
-    11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
-    + 4 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly left
-    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
-    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
-    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.8, 1, 1, 0]]  # Diagonal flip right
-    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
-    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery
+    11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost (0..44 ticks)
+    + 3 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly away from center (44..56 ticks)
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump (56..64 ticks)
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump (64..68 ticks)
+    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.8, 1, 1, 0]]  # Diagonal flip towards ball (68..72 ticks)
+    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up) (72..124 ticks)
+    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery (124..164 ticks)
     dtype=np.float32
 )
 
@@ -146,17 +149,27 @@ class KickoffController:
                     # Countdown ended, car is moving:
                     car_x = float(car["pos"][0])
                     abs_x = abs(car_x)
-                    is_spawn_left = (car_x < 0.0) if team == 0 else (car_x > 0.0)
+                    # For Blue (team 0): +X is Right spawn, -X is Left spawn.
+                    # For Orange (team 1): -X is Right spawn, +X is Left spawn.
+                    # Base sequence is for Left spawn (dodges right towards ball).
+                    # Right spawn needs mirroring (dodges left towards ball).
+                    is_spawn_right = (car_x > 0.0) if team == 0 else (car_x < 0.0)
 
                     # Diagonal spawns (|x| > 1000) use the speedflip sequence
                     if abs_x > 1000.0:
                         self.current_seq = DIAGONAL_KICKOFF_SEQUENCE
-                        self.mirror = is_spawn_left
+                        self.mirror = is_spawn_right
                         self.active = True
                         self.tick = 0
                         self.start_time = now
 
         if self.active and self.current_seq is not None:
+            # Transfer control to AI model as soon as the speedflip lands or approaches ball
+            # This guarantees the bot model aligns its wheels and hits the ball dead-center!
+            if dist_to_ball < 620.0 or (self.tick >= 76 and car.get("on_ground", 1.0) > 0.5):
+                self.reset()
+                return None, None
+
             ticks_elapsed = int((now - self.start_time) * 120.0)
             self.tick = min(ticks_elapsed, len(self.current_seq))
             if self.tick < len(self.current_seq):
