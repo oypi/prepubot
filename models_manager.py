@@ -81,7 +81,7 @@ class BotModelManager:
             else: # Default to nexto
                 self.bot_name = "nexto"
                 from rlmarlbot.nexto.bot import Nexto
-                self.bot = Nexto(self.player_name, self.team, 0, beta=1.0)
+                self.bot = Nexto(self.player_name, self.team, 0, beta=1.0, hardcoded_kickoffs=False)
                 self.bot.initialize_agent(self.field_info)
 
     def set_bot(self, bot_name: str):

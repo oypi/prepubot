@@ -79,6 +79,101 @@ def check_game_window_focused():
     return True
 
 
+# Frame-accurate speedflip kickoff sequence from Nexto (168 ticks @ 120Hz = 1.40s)
+# action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+DIAGONAL_KICKOFF_SEQUENCE = np.array(
+    11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
+    + 4 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly left
+    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
+    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
+    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.8, 1, 1, 0]]  # Diagonal flip right
+    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
+    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery
+    dtype=np.float32
+)
+
+
+class KickoffController:
+    """Manages kickoff detection, countdown priming, left-goes taker arbitration, and speedflips."""
+    def __init__(self):
+        self.active = False
+        self.tick = 0
+        self.start_time = 0.0
+        self.mirror = False
+        self.current_seq = None
+
+    def reset(self):
+        self.active = False
+        self.tick = 0
+        self.current_seq = None
+
+    def step(self, car, ball, mates, team: int, now: float):
+        """
+        Returns (kickoff_action, act_str) if kickoff handling is active, else (None, None).
+        """
+        ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
+        ball_spd = float(np.linalg.norm(ball["vel"]))
+        is_kickoff_ball = (ball_dist_center < 35.0 and ball_spd < 50.0)
+
+        if not is_kickoff_ball or ball_dist_center > 60.0 or ball_spd > 150.0:
+            self.reset()
+            return None, None
+
+        dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
+        car_spd = float(np.linalg.norm(car["vel"]))
+
+        if dist_to_ball > 1500.0 and car.get("on_ground", 1.0) > 0.5 and not self.active:
+            my_xy_dist = float(np.linalg.norm(car["pos"][:2]))
+            is_taker = True
+            for mate in mates:
+                if mate is not None:
+                    m_dist = float(np.linalg.norm(mate["pos"][:2]))
+                    if m_dist < my_xy_dist - 40.0:
+                        is_taker = False
+                        break
+                    elif abs(m_dist - my_xy_dist) <= 40.0:
+                        # Tied distance: left goes
+                        is_left = (car["pos"][0] < mate["pos"][0]) if team == 0 else (car["pos"][0] > mate["pos"][0])
+                        if not is_left:
+                            is_taker = False
+                            break
+
+            if is_taker:
+                if car_spd < 25.0:
+                    # Countdown frozen: hold throttle and boost so car launches instantly on GO!
+                    return [1.0, 0.0, 0.0, 0.0, 0.0, 0, 1, 0], "KICKOFF READY"
+                else:
+                    # Countdown ended, car is moving:
+                    car_x = float(car["pos"][0])
+                    abs_x = abs(car_x)
+                    is_spawn_left = (car_x < 0.0) if team == 0 else (car_x > 0.0)
+
+                    # Diagonal spawns (|x| > 1000) use the speedflip sequence
+                    if abs_x > 1000.0:
+                        self.current_seq = DIAGONAL_KICKOFF_SEQUENCE
+                        self.mirror = is_spawn_left
+                        self.active = True
+                        self.tick = 0
+                        self.start_time = now
+
+        if self.active and self.current_seq is not None:
+            ticks_elapsed = int((now - self.start_time) * 120.0)
+            self.tick = min(ticks_elapsed, len(self.current_seq))
+            if self.tick < len(self.current_seq):
+                raw_act = self.current_seq[self.tick].copy()
+                if self.mirror:
+                    raw_act[1] = -raw_act[1]  # Invert steer
+                    raw_act[3] = -raw_act[3]  # Invert yaw
+                    raw_act[4] = -raw_act[4]  # Invert roll
+                act_str = f"SPEEDFLIP DIAG [{self.tick + 1}/{len(self.current_seq)}]"
+                return raw_act, act_str
+            else:
+                self.reset()
+                return None, None
+
+        return None, None
+
+
 def action_to_act_str(ctrl):
     """Formats a controller state or 8-element action vector into human-readable string."""
     if hasattr(ctrl, "throttle"):
@@ -128,6 +223,7 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
     car = None
     ball = None
     act_str = "IDLE"
+    kickoff_mgr = KickoffController()
 
     print(json.dumps({"type": "ready"}), flush=True)
 
@@ -189,6 +285,7 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
 
         if not has_entities or car is None or ball is None:
             controller.reset()
+            kickoff_mgr.reset()
             is_in_menu = (driver.pc_ptr is None)
             telemetry = {
                 "type": "telemetry",
@@ -221,17 +318,26 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
             bot_manager.bot.team = driver.team
 
         # Execute decision & control
+        now = time.perf_counter()
         if is_paused:
+            kickoff_mgr.reset()
             controller.reset()
             act_str = "PAUSED"
         elif focus_guard and not game_focused:
+            kickoff_mgr.reset()
             controller.reset()
             act_str = "OUT OF FOCUS"
         elif active:
-            ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
-            controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-            act_str = action_to_act_str(ctrl)
+            kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
+            if kick_act is not None:
+                controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                act_str = kick_str
+            else:
+                ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                act_str = action_to_act_str(ctrl)
         else:
+            kickoff_mgr.reset()
             controller.reset()
             act_str = "IDLE"
 
@@ -433,6 +539,7 @@ def main():
     fps_timer = time.perf_counter()
     frames = 0
     fps = 0.0
+    kickoff_mgr = KickoffController()
 
     try:
         while running:
@@ -451,6 +558,7 @@ def main():
 
             if not has_entities or car is None or ball is None:
                 controller.reset()
+                kickoff_mgr.reset()
                 if driver.pc_ptr is None:
                     sys.stdout.write("\r[IN MENU] Waiting for match / Freeplay...                         ")
                 else:
@@ -468,13 +576,20 @@ def main():
                 bot_manager.team = driver.team
                 bot_manager.bot.team = driver.team
 
+            now = time.perf_counter()
             if is_paused:
+                kickoff_mgr.reset()
                 controller.reset()
                 act_str = "PAUSED"
             else:
-                ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
-                controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                act_str = action_to_act_str(ctrl)
+                kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
+                if kick_act is not None:
+                    controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                    act_str = kick_str
+                else:
+                    ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                    controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                    act_str = action_to_act_str(ctrl)
 
             frames += 1
             now = time.perf_counter()
