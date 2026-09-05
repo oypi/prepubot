@@ -15,7 +15,7 @@ from typing import Optional, Tuple, Any
 import numpy as np
 
 # Add RLMarlbot to sys.path so its internal modules can import seamlessly
-CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+CURRENT_DIR = sys._MEIPASS if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") else os.path.dirname(os.path.realpath(__file__))
 RLMARLBOT_ROOT = os.path.join(CURRENT_DIR, "RLMarlbot")
 RLMARLBOT_DIR = os.path.join(RLMARLBOT_ROOT, "rlmarlbot")
 for p in [RLMARLBOT_ROOT, RLMARLBOT_DIR]:
