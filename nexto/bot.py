@@ -10,8 +10,8 @@ import math
 import random
 
 import numpy as np
-from agent import Agent
-from nexto_obs import BOOST_LOCATIONS, NextoObsBuilder
+from .agent import Agent
+from .nexto_obs import BOOST_LOCATIONS, NextoObsBuilder
 from rlbot.flat import ControllerState, GamePacket, MatchPhase, Vector3
 from rlbot.managers import Bot
 from rlbot_flatbuffers import GameMode

@@ -1,8 +1,6 @@
 from typing import Any
-
 import numpy as np
-from rlgym_compat.v1_game_state import V1GameState as GameState
-from rlgym_compat.v1_game_state import V1PlayerData as PlayerData
+from rlgym_compat.game_state import GameState, PlayerData
 
 BOOST_LOCATIONS = (
     (0.0, -4240.0, 70.0),

@@ -180,6 +180,12 @@ class NextoDriver:
             if abs(x) > 100000.0 or math.isnan(x):
                 return None
 
+            # Read exact Unreal Engine FRotator at 0x9C (pitch, yaw, roll)
+            self.mem.seek(target_ptr + 0x9C)
+            p_raw, y_raw, r_raw = struct.unpack("<3i", self.mem.read(12))
+            _const = 0.00009587379924285
+            car_rot = (float(p_raw * _const), float(y_raw * _const), float(r_raw * _const))
+
             s = 1.0 / max(1e-6, qx*qx + qy*qy + qz*qz + qw*qw)
             fw = np.array([
                 1.0 - 2.0 * s * (qy * qy + qz * qz),
@@ -265,6 +271,10 @@ class NextoDriver:
                 "boost": boost,
                 "on_ground": on_ground,
                 "has_flip": has_flip,
+                "quat": (qx, qy, qz, qw),
+                "rot": car_rot,
+                "jumped": bool(jumped),
+                "double_jumped": bool(double_jumped),
             }
         except Exception:
             return None
@@ -299,10 +309,17 @@ class NextoDriver:
             if abs(x) > 100000.0 or math.isnan(x):
                 return None
 
+            # Read exact Unreal Engine FRotator at 0x9C (pitch, yaw, roll)
+            self.mem.seek(self.ball_ptr + 0x9C)
+            p_raw, y_raw, r_raw = struct.unpack("<3i", self.mem.read(12))
+            _const = 0.00009587379924285
+            ball_rot = (float(p_raw * _const), float(y_raw * _const), float(r_raw * _const))
+
             return {
                 "pos": np.array([x, y, z], dtype=np.float32),
                 "vel": np.array([vx, vy, vz], dtype=np.float32),
                 "ang_vel": np.array([wx, wy, wz], dtype=np.float32),
+                "rot": ball_rot,
             }
         except Exception:
             return None

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Nexto Autonomous Player for Rocket League (Freeplay / Exhibition)
-Reads game memory directly via /proc/<pid>/mem and plays using a virtual Xbox 360 controller.
+Autonomous Bot Player for Rocket League (Freeplay / Exhibition / Custom)
+Supports Nexto, Seer, and Element with Direct Memory Input (process_vm_writev)
+and Virtual Gamepad (uinput) modes.
 """
 
 import sys
@@ -10,6 +11,9 @@ import time
 import signal
 import numpy as np
 import subprocess
+import argparse
+import json
+import select
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     sys.path.insert(0, sys._MEIPASS)
@@ -20,6 +24,8 @@ else:
 from read_position import get_rocket_league_pid, RLMemoryReader, cloak_process_name
 from nexto_driver import NextoDriver
 from virtual_controller import VirtualXboxController
+from memory_controller import MemoryController
+from models_manager import BotModelManager
 
 # Cloak process name in /proc/self/comm to blend in as a standard desktop portal daemon
 cloak_process_name("portal-helper")
@@ -72,50 +78,55 @@ def check_game_window_focused():
     return True
 
 
-# Official Nexto speedflip kickoff sequence from nexto/bot.py (168 ticks @ 120Hz = 1.40s)
-# action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
-DIAGONAL_KICKOFF_SEQUENCE = np.array(
-    11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost
-    + 4 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly left
-    + 2 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 1, 1, 0]]  # First jump
-    + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump
-    + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.0, 1, 1, 0]]  # Diagonal flip right
-    + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up)
-    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery
-    dtype=np.float32
-)
+def action_to_act_str(ctrl):
+    """Formats a controller state or 8-element action vector into human-readable string."""
+    if hasattr(ctrl, "throttle"):
+        thr = ctrl.throttle
+        steer = ctrl.steer
+        pitch = ctrl.pitch
+        yaw = ctrl.yaw
+        roll = ctrl.roll
+        jump = bool(ctrl.jump)
+        boost = bool(ctrl.boost)
+        handbrake = bool(ctrl.handbrake)
+    else:
+        thr = ctrl[0]
+        steer = ctrl[1]
+        pitch = ctrl[2]
+        yaw = ctrl[3]
+        roll = ctrl[4]
+        jump = bool(ctrl[5] > 0.5) if len(ctrl) > 5 else False
+        boost = bool(ctrl[6] > 0.5) if len(ctrl) > 6 else False
+        handbrake = bool(ctrl[7] > 0.5) if len(ctrl) > 7 else False
+
+    active_acts = []
+    if thr > 0: active_acts.append("FWD")
+    elif thr < 0: active_acts.append("REV")
+    if steer > 0: active_acts.append("RIGHT")
+    elif steer < 0: active_acts.append("LEFT")
+    if pitch > 0: active_acts.append("PITCH_UP")
+    elif pitch < 0: active_acts.append("PITCH_DN")
+    if roll < 0: active_acts.append("ROLL_L")
+    elif roll > 0: active_acts.append("ROLL_R")
+    if jump: active_acts.append("JUMP")
+    if boost: active_acts.append("BOOST")
+    if handbrake: active_acts.append("POWERSLIDE")
+    return "+".join(active_acts) if active_acts else "IDLE"
 
 
-def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
-    import json
-    import select
-
+def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initial_active=False):
     active = initial_active
     focus_guard = False
     input_mode = initial_mode
-    beta = 1.0
     fps_timer = time.perf_counter()
     frames = 0
     fps = 0.0
 
-    TICK_SKIP = 8
-    PHYSICS_HZ = 120.0
-    DECISION_INTERVAL = TICK_SKIP / PHYSICS_HZ  # ~0.06667s (15 decisions/sec)
-
-    last_decision_time = 0.0
     last_focus_check = 0.0
     game_focused = True
-    action = np.zeros(8, dtype=np.int32)
     car = None
     ball = None
     act_str = "IDLE"
-
-    kickoff_active = False
-    kickoff_tick = 0
-    kickoff_start_time = 0.0
-    kickoff_mirror = False
-    current_kickoff_seq = None
-    kickoff_type = ""
 
     print(json.dumps({"type": "ready"}), flush=True)
 
@@ -134,23 +145,22 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
                     active = True
                 elif cmd == "stop":
                     active = False
-                    action = np.zeros(8, dtype=np.int32)
                     act_str = "IDLE"
-                    kickoff_active = False
                     controller.reset()
                 elif cmd == "toggle":
                     active = not active
                     if not active:
-                        action = np.zeros(8, dtype=np.int32)
                         act_str = "IDLE"
-                        kickoff_active = False
                         controller.reset()
                 elif cmd == "set_beta":
                     beta = float(msg.get("beta", 1.0))
+                    if hasattr(bot_manager.bot, "beta"):
+                        bot_manager.bot.beta = beta
+                elif cmd == "set_bot":
+                    new_bot = msg.get("bot", "nexto")
+                    bot_manager.set_bot(new_bot)
                 elif cmd == "set_focus_guard":
                     focus_guard = bool(msg.get("enabled", False))
-                elif cmd == "set_input_mode":
-                    pass  # Pure Gamepad emulation, KBM deprecated
                 elif cmd == "quit":
                     controller.reset()
                     return
@@ -165,16 +175,18 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
             game_focused = check_game_window_focused()
 
         is_paused = driver.is_paused()
-
         has_entities = driver.update_entities()
+
+        # Keep controller pointers synchronized with active game objects (respawns, goals)
+        if hasattr(controller, "update_pointers"):
+            controller.update_pointers(driver.pc_ptr, driver.car_ptr)
+
         car = driver.read_car_state() if has_entities else None
         ball = driver.read_ball_state() if has_entities else None
         mates = [driver.read_car_state(car_ptr=p) for p in driver.mate_ptrs] if has_entities else []
         opponents = [driver.read_car_state(car_ptr=p) for p in driver.opp_ptrs] if has_entities else []
 
         if not has_entities or car is None or ball is None:
-            kickoff_active = False
-            action = np.zeros(8, dtype=np.int32)
             controller.reset()
             is_in_menu = (driver.pc_ptr is None)
             telemetry = {
@@ -182,6 +194,8 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
                 "state": "IN_MENU" if is_in_menu else "MATCH",
                 "active": active,
                 "team": driver.team,
+                "bot": bot_manager.bot_name,
+                "input_mode": input_mode,
                 "focus_guard": focus_guard,
                 "fps": round(fps, 1),
                 "car": {"pos": [0.0, 0.0, 0.0], "spd": 0.0, "boost": 0.0, "on_ground": False, "has_flip": False},
@@ -194,123 +208,31 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
             time.sleep(0.1 if is_in_menu else 0.01)
             continue
 
-        car_spd = float(np.linalg.norm(car["vel"]))
-        ball_spd = float(np.linalg.norm(ball["vel"]))
+        # Check if ball is kickoff ball to reset boost pads
         ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
-        dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
-
-        # Kickoff detection: ball is at center and nearly stationary
-        is_kickoff_ball = (ball_dist_center < 35.0 and ball_spd < 50.0)
-        if is_kickoff_ball:
+        ball_spd = float(np.linalg.norm(ball["vel"]))
+        if ball_dist_center < 35.0 and ball_spd < 50.0:
             driver.reset_boost_pads()
 
-        if not is_kickoff_ball or ball_dist_center > 60.0 or ball_spd > 150.0:
-            kickoff_active = False
+        # Update bot team if team changed
+        if driver.team != bot_manager.team:
+            bot_manager.team = driver.team
+            bot_manager.bot.team = driver.team
 
-        if active and not is_paused and is_kickoff_ball:
-            if dist_to_ball > 1500.0 and car["on_ground"] > 0.5 and not kickoff_active:
-                my_xy_dist = float(np.linalg.norm(car["pos"][:2]))
-                is_taker = True
-                for mate in mates:
-                    if mate is not None:
-                        m_dist = float(np.linalg.norm(mate["pos"][:2]))
-                        if m_dist < my_xy_dist - 40.0:
-                            is_taker = False
-                            break
-                        elif abs(m_dist - my_xy_dist) <= 40.0:
-                            # Tied distance: left goes
-                            is_left = (car["pos"][0] < mate["pos"][0]) if driver.team == 0 else (car["pos"][0] > mate["pos"][0])
-                            if not is_left:
-                                is_taker = False
-                                break
-
-                if is_taker:
-                    if car_spd < 25.0:
-                        # Countdown frozen: prime throttle and boost
-                        action = np.array([1, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
-                        act_str = "KICKOFF READY"
-                    else:
-                        # Countdown ended, car is moving:
-                        # Diagonal spawns (|x| > 1000) use the official Nexto speedflip sequence from nexto/bot.py
-                        # Straight center and off-center spawns let Nexto's neural network drive naturally (beta=0.5)
-                        car_x = float(car["pos"][0])
-                        abs_x = abs(car_x)
-                        is_spawn_left = (car_x < 0.0) if driver.team == 0 else (car_x > 0.0)
-
-                        if abs_x > 1000.0:
-                            current_kickoff_seq = DIAGONAL_KICKOFF_SEQUENCE
-                            kickoff_mirror = is_spawn_left
-                            kickoff_active = True
-                            kickoff_tick = 0
-                            kickoff_start_time = now
-
-            if kickoff_active and current_kickoff_seq is not None:
-                # Advance kickoff_tick by elapsed physics time (120 Hz) instead of per-loop
-                ticks_elapsed = int((now - kickoff_start_time) * 120.0)
-                kickoff_tick = min(ticks_elapsed, len(current_kickoff_seq))
-                if kickoff_tick < len(current_kickoff_seq):
-                    raw_act = current_kickoff_seq[kickoff_tick].copy()
-                    if kickoff_mirror:
-                        raw_act[1] = -raw_act[1]  # Invert steer
-                        raw_act[3] = -raw_act[3]  # Invert yaw
-                        raw_act[4] = -raw_act[4]  # Invert roll
-                    action = raw_act
-                    act_str = f"SPEEDFLIP DIAG [{kickoff_tick + 1}/{len(current_kickoff_seq)}]"
-                else:
-                    kickoff_active = False
-
-        if not kickoff_active:
-            time_since_decision = now - last_decision_time
-            if time_since_decision >= DECISION_INTERVAL:
-                last_decision_time = now
-                time_since_decision = 0.0
-
-                if is_paused:
-                    action = np.zeros(8, dtype=np.int32)
-                    act_str = "PAUSED"
-                elif focus_guard and not game_focused:
-                    action = np.zeros(8, dtype=np.int32)
-                    act_str = "OUT OF FOCUS"
-                elif active:
-                    # When inside kickoff approach on non-diagonal spawns, use official Nexto stochastic kickoff (beta=0.5, nexto/bot.py line 190)
-                    kickoff_beta = 0.5 if (is_kickoff_ball and dist_to_ball > 800.0) else beta
-                    q, kv, m = driver.build_observation(car, ball, teammates=mates, opponents=opponents, team=driver.team)
-                    action, _ = driver.agent.act((q, kv, m), beta=kickoff_beta)
-                    driver.prev_action = np.array(action, dtype=np.float32)
-
-                    active_acts = []
-                    if action[0] > 0: active_acts.append("FWD")
-                    elif action[0] < 0: active_acts.append("REV")
-                    if action[1] > 0: active_acts.append("RIGHT")
-                    elif action[1] < 0: active_acts.append("LEFT")
-                    if action[2] > 0: active_acts.append("PITCH_UP")
-                    elif action[2] < 0: active_acts.append("PITCH_DN")
-                    if action[4] < 0: active_acts.append("ROLL_L")
-                    elif action[4] > 0: active_acts.append("ROLL_R")
-                    if action[5]: active_acts.append("JUMP")
-                    if action[6]: active_acts.append("BOOST")
-                    if action[7]: active_acts.append("POWERSLIDE")
-                    act_str = "+".join(active_acts) if active_acts else "IDLE"
-                else:
-                    action = np.zeros(8, dtype=np.int32)
-                    act_str = "IDLE"
-        else:
-            time_since_decision = 0.0
-
-        # Apply controller input continuously for the tick duration
-        should_drive = active and not is_paused and car is not None
-        if focus_guard and not game_focused:
-            should_drive = False
-
-        if should_drive:
-            controller.apply_action(
-                action,
-                on_ground=(car["on_ground"] > 0.5),
-                car_z=float(car["pos"][2]),
-                time_in_decision=time_since_decision,
-            )
+        # Execute decision & control
+        if is_paused:
+            controller.reset()
+            act_str = "PAUSED"
+        elif focus_guard and not game_focused:
+            controller.reset()
+            act_str = "OUT OF FOCUS"
+        elif active:
+            ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+            controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+            act_str = action_to_act_str(ctrl)
         else:
             controller.reset()
+            act_str = "IDLE"
 
         frames += 1
         now = time.perf_counter()
@@ -319,67 +241,58 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
             frames = 0
             fps_timer = now
 
-        if car is not None and ball is not None:
-            dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
-            speed = float(np.linalg.norm(car["vel"]))
-            ball_spd = float(np.linalg.norm(ball["vel"]))
+        dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
+        speed = float(np.linalg.norm(car["vel"]))
 
-            mate_telemetry = None
-            if mates and len(mates) > 0 and mates[0] is not None:
-                mate = mates[0]
-                mate_dist_to_me = float(np.linalg.norm(car["pos"] - mate["pos"]))
-                mate_dist_to_ball = float(np.linalg.norm(ball["pos"] - mate["pos"]))
-                mate_speed = float(np.linalg.norm(mate["vel"]))
-                mate_telemetry = {
-                    "pos": [round(float(v), 1) for v in mate["pos"]],
-                    "spd": round(mate_speed, 1),
-                    "boost": round(float(mate["boost"]) * 100.0, 1),
-                    "dist": round(mate_dist_to_me, 1),
-                    "ball_dist": round(mate_dist_to_ball, 1),
-                }
-
-            opp_telemetry = None
-            if opponents and len(opponents) > 0 and opponents[0] is not None:
-                opp = opponents[0]
-                opp_dist_to_me = float(np.linalg.norm(car["pos"] - opp["pos"]))
-                opp_dist_to_ball = float(np.linalg.norm(ball["pos"] - opp["pos"]))
-                opp_speed = float(np.linalg.norm(opp["vel"]))
-                opp_telemetry = {
-                    "pos": [round(float(v), 1) for v in opp["pos"]],
-                    "spd": round(opp_speed, 1),
-                    "boost": round(float(opp["boost"]) * 100.0, 1),
-                    "dist": round(opp_dist_to_me, 1),
-                    "ball_dist": round(opp_dist_to_ball, 1),
-                }
-
-            telemetry = {
-                "type": "telemetry",
-                "active": active,
-                "team": driver.team,
-                "focus_guard": focus_guard,
-                "fps": round(fps, 1),
-                "car": {
-                    "pos": [round(float(v), 1) for v in car["pos"]],
-                    "spd": round(speed, 1),
-                    "boost": round(float(car["boost"]) * 100.0, 1),
-                    "on_ground": bool(car["on_ground"] > 0.5),
-                    "has_flip": bool(car["has_flip"] > 0.5),
-                },
-                "ball": {
-                    "pos": [round(float(v), 1) for v in ball["pos"]],
-                    "dist": round(dist_to_ball, 1),
-                    "spd": round(ball_spd, 1),
-                },
-                "teammate": mate_telemetry,
-                "enemy": opp_telemetry,
-                "input_mode": input_mode,
-                "action": act_str,
+        mate_telemetry = None
+        if mates and len(mates) > 0 and mates[0] is not None:
+            mate = mates[0]
+            mate_telemetry = {
+                "pos": [round(float(v), 1) for v in mate["pos"]],
+                "spd": round(float(np.linalg.norm(mate["vel"])), 1),
+                "boost": round(float(mate["boost"]) * 100.0, 1),
+                "dist": round(float(np.linalg.norm(car["pos"] - mate["pos"])), 1),
+                "ball_dist": round(float(np.linalg.norm(ball["pos"] - mate["pos"])), 1),
             }
-            print(json.dumps(telemetry), flush=True)
 
-        # High-precision hybrid clock: exact 120.0 Hz (8.333 ms per frame)
-        # Uses sleep() for coarse waiting to preserve low CPU usage,
-        # then busy-spins for the remaining sub-millisecond for microsecond-level accuracy.
+        opp_telemetry = None
+        if opponents and len(opponents) > 0 and opponents[0] is not None:
+            opp = opponents[0]
+            opp_telemetry = {
+                "pos": [round(float(v), 1) for v in opp["pos"]],
+                "spd": round(float(np.linalg.norm(opp["vel"])), 1),
+                "boost": round(float(opp["boost"]) * 100.0, 1),
+                "dist": round(float(np.linalg.norm(car["pos"] - opp["pos"])), 1),
+                "ball_dist": round(float(np.linalg.norm(ball["pos"] - opp["pos"])), 1),
+            }
+
+        telemetry = {
+            "type": "telemetry",
+            "active": active,
+            "team": driver.team,
+            "bot": bot_manager.bot_name,
+            "input_mode": input_mode,
+            "focus_guard": focus_guard,
+            "fps": round(fps, 1),
+            "car": {
+                "pos": [round(float(v), 1) for v in car["pos"]],
+                "spd": round(speed, 1),
+                "boost": round(float(car["boost"]) * 100.0, 1),
+                "on_ground": bool(car["on_ground"] > 0.5),
+                "has_flip": bool(car["has_flip"] > 0.5),
+            },
+            "ball": {
+                "pos": [round(float(v), 1) for v in ball["pos"]],
+                "dist": round(dist_to_ball, 1),
+                "spd": round(ball_spd, 1),
+            },
+            "teammate": mate_telemetry,
+            "enemy": opp_telemetry,
+            "action": act_str,
+        }
+        print(json.dumps(telemetry), flush=True)
+
+        # Precise 120.0 Hz loop timing (8.333 ms per frame)
         target_tick = loop_start + (1.0 / 120.0)
         remaining = target_tick - time.perf_counter()
         if remaining > 0.002:
@@ -389,16 +302,16 @@ def run_ipc(driver, controller, initial_mode="GAMEPAD", initial_active=False):
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Rocket League Nexto Autonomous Bot")
+    parser = argparse.ArgumentParser(description="Rocket League Autonomous Bot Player")
     parser.add_argument("--ipc", action="store_true", help="Run in JSON IPC mode for GUI integration")
     parser.add_argument("--start-active", action="store_true", help="Start playing immediately in IPC mode")
+    parser.add_argument("--bot", type=str, default="nexto", choices=["nexto", "seer", "element"], help="Bot AI model (default: nexto)")
+    parser.add_argument("--mode", type=str, default="uinput", choices=["uinput", "memory"], help="Input mode: 'uinput' (virtual gamepad, safe and stable) or 'memory' (direct process_vm_writev)")
     args = parser.parse_args()
 
     pid = get_rocket_league_pid()
     if not pid:
         if args.ipc:
-            import json
             print(json.dumps({"type": "error", "message": "Rocket League process not running"}), flush=True)
         else:
             print("Error: Rocket League process (RocketLeague.exe) not running!")
@@ -408,21 +321,23 @@ def main():
         scanner = RLMemoryReader(pid)
     except PermissionError as e:
         if args.ipc:
-            import json
             print(json.dumps({"type": "error", "message": "YAMA_PTRACE_DENIED", "details": str(e)}), flush=True)
         else:
             print(f"\n[!] {e}\n")
         sys.exit(1)
 
-    try:
-        controller = VirtualXboxController()
-    except Exception as e:
-        if args.ipc:
-            import json
-            print(json.dumps({"type": "error", "message": "UINPUT_DENIED", "details": "Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput"}), flush=True)
-        else:
-            print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
-        sys.exit(1)
+    mode_str = "DIRECT MEMORY" if args.mode == "memory" else "GAMEPAD"
+    if args.mode == "memory":
+        controller = MemoryController(pid=pid)
+    else:
+        try:
+            controller = VirtualXboxController()
+        except Exception as e:
+            if args.ipc:
+                print(json.dumps({"type": "error", "message": "UINPUT_DENIED", "details": "Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput"}), flush=True)
+            else:
+                print("\n[!] Permission denied for /dev/uinput. Run: sudo chmod 666 /dev/uinput\n")
+            sys.exit(1)
 
     pc_ptr = scanner.find_player_controller()
     is_active = args.start_active
@@ -430,8 +345,6 @@ def main():
     # If in main menu (PlayerController not yet active in a match)
     if not pc_ptr:
         if args.ipc:
-            import json
-            import select
             print(json.dumps({"type": "status", "state": "IN_MENU", "active": is_active, "message": "In Main Menu"}), flush=True)
             while not pc_ptr:
                 if not os.path.exists(f"/proc/{pid}"):
@@ -473,7 +386,7 @@ def main():
                     pc_ptr = scanner.find_player_controller()
                 except Exception:
                     pass
-            print("\n[+] Match detected! Attaching Nexto...")
+            print("\n[+] Match detected! Attaching Bot...")
 
     scanner.close()
 
@@ -481,15 +394,19 @@ def main():
         driver = NextoDriver(pid, pc_ptr)
     except PermissionError as e:
         if args.ipc:
-            import json
             print(json.dumps({"type": "error", "message": "YAMA_PTRACE_DENIED", "details": str(e)}), flush=True)
         else:
             print(f"\n[!] {e}\n")
         sys.exit(1)
 
+    if hasattr(controller, "update_pointers"):
+        controller.update_pointers(pc_ptr=pc_ptr, car_ptr=driver.car_ptr)
+
+    bot_manager = BotModelManager(bot_name=args.bot, team=driver.team)
+
     if args.ipc:
         try:
-            run_ipc(driver, controller, initial_active=is_active)
+            run_ipc(driver, controller, bot_manager, initial_mode=mode_str, initial_active=is_active)
         finally:
             controller.reset()
             controller.close()
@@ -497,12 +414,12 @@ def main():
         return
 
     print("==================================================")
-    print("         Rocket League Nexto Autonomous Bot       ")
+    print(f"      Rocket League Bot ({bot_manager.bot_name.upper()})")
     print("==================================================")
     print(f"[+] Attached to RocketLeague.exe (PID: {pid})")
     print(f"[+] Controller: {hex(pc_ptr)}")
-    print("[+] Virtual Xbox 360 Controller ready!")
-    print("[+] Nexto Neural Network ready!")
+    print(f"[+] Mode: {mode_str}")
+    print(f"[+] Bot Model: {bot_manager.bot_name.upper()} ready!")
 
     running = True
 
@@ -513,41 +430,53 @@ def main():
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
-    print("\n[>>>] NEXTO IS PLAYING! Press Ctrl+C to stop.\n")
+    print(f"\n[>>>] {bot_manager.bot_name.upper()} IS PLAYING! Press Ctrl+C to stop.\n")
 
     fps_timer = time.perf_counter()
     frames = 0
     fps = 0.0
 
-    TICK_SKIP = 8
-    PHYSICS_HZ = 120.0
-    DECISION_INTERVAL = TICK_SKIP / PHYSICS_HZ  # ~0.06667s
-
-    last_decision_time = 0.0
-    action = np.zeros(8, dtype=np.int32)
-    car = None
-    ball = None
-
     try:
         while running:
             loop_start = time.perf_counter()
-            now = time.perf_counter()
 
-            if now - last_decision_time >= DECISION_INTERVAL:
-                last_decision_time = now
-                action, car, ball = driver.step(beta=1.0)
-                if car is None or ball is None:
-                    controller.reset()
-                    if driver.pc_ptr is None:
-                        sys.stdout.write("\r[IN MENU] Waiting for match / Freeplay...                         ")
-                    else:
-                        sys.stdout.write("\r[GOAL / RESPAWN] Waiting for kickoff...                          ")
-                    sys.stdout.flush()
-                    time.sleep(0.05)
-                    continue
+            is_paused = driver.is_paused()
+            has_entities = driver.update_entities()
 
-            if car is not None:
-                controller.apply_action(action, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]), time_in_decision=(now - last_decision_time))
+            if hasattr(controller, "update_pointers"):
+                controller.update_pointers(driver.pc_ptr, driver.car_ptr)
+
+            car = driver.read_car_state() if has_entities else None
+            ball = driver.read_ball_state() if has_entities else None
+            mates = [driver.read_car_state(car_ptr=p) for p in driver.mate_ptrs] if has_entities else []
+            opponents = [driver.read_car_state(car_ptr=p) for p in driver.opp_ptrs] if has_entities else []
+
+            if not has_entities or car is None or ball is None:
+                controller.reset()
+                if driver.pc_ptr is None:
+                    sys.stdout.write("\r[IN MENU] Waiting for match / Freeplay...                         ")
+                else:
+                    sys.stdout.write("\r[GOAL / RESPAWN] Waiting for kickoff...                          ")
+                sys.stdout.flush()
+                time.sleep(0.05)
+                continue
+
+            ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
+            ball_spd = float(np.linalg.norm(ball["vel"]))
+            if ball_dist_center < 35.0 and ball_spd < 50.0:
+                driver.reset_boost_pads()
+
+            if driver.team != bot_manager.team:
+                bot_manager.team = driver.team
+                bot_manager.bot.team = driver.team
+
+            if is_paused:
+                controller.reset()
+                act_str = "PAUSED"
+            else:
+                ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                act_str = action_to_act_str(ctrl)
 
             frames += 1
             now = time.perf_counter()
@@ -559,22 +488,8 @@ def main():
             dist_to_ball = np.linalg.norm(car["pos"] - ball["pos"])
             speed = np.linalg.norm(car["vel"])
 
-            active_acts = []
-            if action[0] > 0: active_acts.append("FWD")
-            elif action[0] < 0: active_acts.append("REV")
-            if action[1] > 0: active_acts.append("RIGHT")
-            elif action[1] < 0: active_acts.append("LEFT")
-            if action[2] > 0: active_acts.append("PITCH_UP")
-            elif action[2] < 0: active_acts.append("PITCH_DN")
-            if action[4] < 0: active_acts.append("ROLL_L")
-            elif action[4] > 0: active_acts.append("ROLL_R")
-            if action[5]: active_acts.append("JUMP")
-            if action[6]: active_acts.append("BOOST")
-            if action[7]: active_acts.append("POWERSLIDE")
-            act_str = "+".join(active_acts) if active_acts else "IDLE"
-
             hud = (
-                f"\r[{fps:4.1f} Hz] "
+                f"\r[{fps:4.1f} Hz] [{bot_manager.bot_name.upper()}] "
                 f"Car: ({car['pos'][0]:6.0f}, {car['pos'][1]:6.0f}, {car['pos'][2]:4.0f}) | "
                 f"Spd: {speed:5.0f} | "
                 f"Ball Dist: {dist_to_ball:5.0f} | "
@@ -593,7 +508,7 @@ def main():
     except Exception as e:
         print(f"\n[-] Error in control loop: {e}")
     finally:
-        print("\n[+] Shutting down Nexto and releasing controller...")
+        print(f"\n[+] Shutting down {bot_manager.bot_name.upper()} and releasing controller...")
         controller.reset()
         controller.close()
         driver.close()

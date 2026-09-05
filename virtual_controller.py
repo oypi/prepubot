@@ -49,6 +49,17 @@ class VirtualXboxController:
         Translates Nexto action array into gamepad events.
         action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         """
+        if hasattr(action, "throttle"):
+            action = [
+                action.throttle,
+                action.steer,
+                action.pitch,
+                action.yaw,
+                action.roll,
+                1 if action.jump else 0,
+                1 if action.boost else 0,
+                1 if action.handbrake else 0,
+            ]
         throttle, steer, pitch, yaw, roll, jump, boost, handbrake = action
 
         throttle_val = float(throttle)
@@ -72,33 +83,48 @@ class VirtualXboxController:
             stick_y = 0
             roll_left = 0
             roll_right = 0
+            air_roll_btn = 0
         else:
             # Airborne or jumping/flipping
             if jump_val:
-                # DODGE / FLIP frame: stick controls flip direction
+                # DODGE / FLIP frame:
+                # In Rocket League, DodgeForward is -pitch, DodgeRight is roll!
+                # If roll is ~0, stick_x MUST BE 0 to guarantee clean straight flips/flicks!
+                # Never let residual steering or yaw trigger an accidental sideflip!
                 if abs(roll_val) > 0.1:
                     stick_x = int(roll_val * 32767)
-                elif abs(yaw_val) > 0.1:
-                    stick_x = int(yaw_val * 32767)
                 else:
-                    stick_x = int(steer_val * 32767)
+                    stick_x = 0
 
                 # Xbox gamepad: ABS_Y negative = stick UP = pitch nose down
                 stick_y = int(pitch_val * 32767)
                 roll_left = 0
                 roll_right = 0
+                air_roll_btn = 0
             else:
                 # Free aerial flight / flip cancel / recovery
-                stick_x = int(yaw_val * 32767) if abs(yaw_val) > 0.1 else int(steer_val * 32767)
+                if abs(roll_val) > 0.1:
+                    # When rolling in the air, deflect stick_x and engage Air Roll (BTN_X + directional bumpers)
+                    stick_x = int(roll_val * 32767)
+                    air_roll_btn = 1
+                    roll_left = 1 if roll_val < -0.1 else 0
+                    roll_right = 1 if roll_val > 0.1 else 0
+                else:
+                    stick_x = int(yaw_val * 32767) if abs(yaw_val) > 0.1 else int(steer_val * 32767)
+                    air_roll_btn = 0
+                    roll_left = 0
+                    roll_right = 0
+
                 stick_y = int(pitch_val * 32767)
-                roll_left = 1 if roll_val < -0.1 else 0
-                roll_right = 1 if roll_val > 0.1 else 0
+
+        # Powerslide on ground or Air Roll in the air
+        btn_x = 1 if ((handbrake_val and on_ground) or air_roll_btn) else 0
 
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, max(-32768, min(32767, stick_x)))
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, max(-32768, min(32767, stick_y)))
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, 1 if jump_val else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_B, 1 if boost_val else 0)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, 1 if (handbrake_val and (on_ground or car_z < 50.0)) else 0)
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, btn_x)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, roll_left)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_TR, roll_right)
         self.ui.syn()
