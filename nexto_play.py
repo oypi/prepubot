@@ -54,7 +54,7 @@ def get_current_version():
                         return v
             except Exception:
                 pass
-    return "1.1.0"
+    return "1.2.0"
 
 
 def parse_version(v_str):
