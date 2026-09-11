@@ -1,5 +1,7 @@
 # PrepuBot: Rocket League Autonomous Memory Bot
 
+<img width="600" height="338" alt="gameplay_test3" src="https://github.com/user-attachments/assets/365cfef5-52c5-4a24-831f-781682529efb" />
+
 PrepuBot is a high-performance, out-of-process autonomous bot for Rocket League on Linux. It reads live game telemetry directly from running game process memory, runs real-time inference using state-of-the-art Transformer and Actor-Critic neural network models (**Nexto**, **Seer**, **Element**), and injects inputs through an emulated virtual Xbox 360 gamepad via `/dev/uinput`.
 
 It includes a lightweight desktop overlay and HUD written in Rust with **egui** and global hotkey support (**F6** toggle).
