@@ -1,36 +1,38 @@
 # PrepuBot: Rocket League Autonomous Memory Bot
 
-PrepuBot is a high-performance, out-of-process autonomous bot for Rocket League on Linux. It reads live game telemetry directly from the running game process memory via `/proc/<pid>/mem`, runs inference using the **Nexto** Transformer neural network model, and injects inputs through an emulated virtual Xbox 360 gamepad via `/dev/uinput`.
+PrepuBot is a high-performance, out-of-process autonomous bot for Rocket League on Linux. It reads live game telemetry directly from running game process memory, runs real-time inference using state-of-the-art Transformer and Actor-Critic neural network models (**Nexto**, **Seer**, **Element**), and injects inputs through an emulated virtual Xbox 360 gamepad via `/dev/uinput`.
 
 It includes a lightweight desktop overlay and HUD written in Rust with **egui** and global hotkey support (**F6** toggle).
 
 ---
 
-## Features
+## Highlights & Features
 
 - **Direct Memory Telemetry (`read_position.py`)**:
-  - Discovers engine globals (`GNames`, `GObjects`) and traverses Unreal Engine 3 structures.
-  - Reads player car coordinates, velocity, angular velocity, and PhysX rotation quaternion (`0x5D0`).
-  - Tracks ball physics and dynamically discovers teammate/opponent cars.
-  - Ground contact and double jump flags via `Vehicle_TA` flags (`0x7F8`).
+  - **Zero-Latency Auto Offset Recovery**: Instant startup verification of engine globals (`GNames`, `GObjects`) in <0.5ms. If Rocket League updates or recompiles, an automated dynamic memory scanner locates tables in ~1.4s and caches them to disk (`~/.cache/prepubot/offsets.json`), ensuring users never get stuck with a non-functional bot.
+  - **PhysX Rigid-Body Simulation State**: Reads player car coordinates, linear velocity, angular velocity, and orientation quaternions atomically from contiguous PhysX simulation structures (`RBState`).
+  - **Zero-Footprint Stealth Reading**: Direct Linux kernel reads via `process_vm_readv` syscalls with zero open file descriptors in `/proc/<pid>/fd/` and process name cloaking (`portal-helper`).
+  - **Comprehensive Field Physics**: Tracks real-time ball trajectory, active boost pad timers, teammate/opponent positions, and native surface contact flags.
 - **Multi-Bot Model Manager (`models_manager.py`)**:
   - Seamless in-game hot-switching between **Nexto**, **Seer**, and **Element**.
-  - Direct translation from memory state packets to RLBot GameTickPackets.
-  - Configurable Nexto temperature (`beta`), flip cancel tuning, and team inversion.
-- **Input Emulation (`virtual_controller.py`)**:
+  - Direct state translation from memory packets to RLBot GameTickPackets.
+  - Configurable policy temperature (`beta`), tactical depth matching, and team inversion.
+- **Input Emulation & Air Recovery (`virtual_controller.py`)**:
   - Emulates a hardware-level Microsoft Xbox 360 controller using Linux `/dev/uinput`.
   - Continuous analog triggers for throttle and brake (`RT`/`LT`), left stick for steering, yaw, and pitch.
-  - Dodge/flip clamping to eliminate side flips during ground driving and aerial contests.
+  - **Balanced 6DOF Air Recovery**: PWM time-sharing between yaw alignment and roll leveling for agile aerial control.
+  - **Powerslide Landing Cushioning**: Pre-engages powerslide during descent to preserve 100% forward momentum when landing sideways.
 - **Autonomous Play & Kickoffs (`nexto_play.py`)**:
   - Physics-synchronized 120Hz polling with frame-accurate controller input updates.
-  - Automated kickoff detection: frame-accurate speedflip sequences for diagonal spawns and neural net play for central kickoffs.
-  - Window focus guard: automatically pauses inputs when Rocket League loses focus (supports Niri, Hyprland, Sway, KDE, GNOME, and X11).
+  - **Overhauled Kickoff Controller**: Mirrored speedflips on diagonal spawns, target-lock homing into ball center, and terminal 50/50 impact dodges.
+  - **Window Focus Guard**: Automatically pauses inputs when Rocket League loses focus (supports Niri, Hyprland, Sway, KDE, GNOME, and X11).
+  - **In-App Version & Update Detection**: Non-blocking background update check that notifies you with a 1-click update link when a newer PrepuBot release is published on GitHub.
   - Bi-directional JSON IPC protocol for external frontends.
-- **Rust Desktop HUD (`nexto_gui/`)**:
-  - Clean cyberpunk dark-mode GUI built with `egui` and `eframe`.
+- **Rust Tactical HUD (`nexto_gui/`)**:
+  - Cyberpunk dark-mode GUI built with `egui` and `eframe`.
   - Live HUD displaying car speed, boost percentage, ball distance, current action, teammate/opponent status, and FPS.
   - Global background hotkey thread listening for **F6** across all raw input devices.
-  - Bot selector dropdown (Nexto / Seer / Element), window focus guard, and window pin (always on top).
+  - Model selector dropdown (Nexto / Seer / Element), window focus guard, and window pin (always on top).
 
 ---
 
@@ -41,17 +43,18 @@ It includes a lightweight desktop overlay and HUD written in Rust with **egui** 
 ├── nexto_driver.py        # Observation builder and memory state bridge
 ├── nexto_gui/             # Rust desktop HUD & launcher (eframe, egui)
 ├── nexto_play.py          # Main bot runner, 120 Hz tick loop, IPC daemon
-├── read_position.py       # Unreal Engine memory scanner (process_vm_readv)
+├── read_position.py       # Unreal Engine memory scanner & auto offset recovery
 ├── virtual_controller.py  # evdev /dev/uinput Xbox 360 virtual controller
+├── version.txt            # Release version manifest
 ├── RLMarlbot/             # Bot models, neural weights, and Linux SDK adapters
 └── build_standalone.sh    # Script to bundle everything into a single binary
 ```
 
 ---
 
-## Quick Start (Standalone Single-Binary for Friends)
+## Quick Start (Standalone Single-Binary)
 
-If you share the standalone executable with friends, **they do NOT need Python, PyTorch, pip, git, or Rust installed**. Everything is embedded into a single portable binary.
+If you use the standalone executable, **you do NOT need Python, PyTorch, pip, git, or Rust installed**. Everything is embedded into a single portable binary.
 
 ### 1. One-Line System Permission Setup
 On Linux (Ubuntu, Debian, Fedora, Arch, SteamOS), the bot requires permission to emulate an Xbox gamepad and inspect game memory:
@@ -60,7 +63,7 @@ On Linux (Ubuntu, Debian, Fedora, Arch, SteamOS), the bot requires permission to
 # 1. Allow gamepad emulation
 sudo chmod 666 /dev/uinput
 
-# 2. Allow reading game memory via /proc/<pid>/mem
+# 2. Allow reading game memory via process_vm_readv / ptrace
 echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
 
 # 3. (Optional) Ensure user is in input group for global F6 hotkey
@@ -72,7 +75,7 @@ sudo usermod -aG input $USER
 chmod +x prepubot
 ./prepubot
 ```
-On first launch, PrepuBot automatically extracts its internal Nexto engine into `~/.cache/prepubot/` and connects to Rocket League.
+On first launch, PrepuBot extracts its internal engine into `~/.cache/prepubot/` and automatically connects to Rocket League.
 
 ---
 
@@ -88,7 +91,7 @@ Rocket League on Linux (via Steam Proton, Heroic Games Launcher, or Lutris) runs
    PrepuBot automatically detects and attaches exclusively to `RocketLeague.exe`, completely ignoring `RocketLeague_EAC.exe`.
 
 2. **Dual Operating Modes**:
-   - **Default EAC Mode**: PrepuBot functions out-of-process via Linux `/proc/<pid>/mem` reading.
+   - **Default EAC Mode**: PrepuBot functions out-of-process via Linux kernel memory reading.
    - **Offline Mode (`-noeac`)**: For zero-risk offline play in Freeplay and custom training, you can add `-noeac` to Rocket League's launch arguments in Steam or Heroic. PrepuBot seamlessly connects to both modes.
 
 ---
@@ -101,7 +104,7 @@ To produce the single-file distribution binary (`dist/prepubot`):
 ./build_standalone.sh
 ```
 
-This automated script bundles PyTorch CPU, NumPy, evdev, the Nexto Transformer weights, and the Cyberpunk HUD GUI into `dist/prepubot` (~388 MB).
+This automated script bundles PyTorch CPU, NumPy, evdev, all bot neural network weights (Nexto, Seer, Element), and the Cyberpunk HUD GUI into `dist/prepubot` (~523 MB).
 
 ---
 
@@ -136,4 +139,3 @@ cargo build --release
 ## License
 
 MIT License. Educational and local offline research use only.
-
