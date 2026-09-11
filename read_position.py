@@ -8,6 +8,7 @@ import sys
 import os
 import struct
 import time
+import math
 import subprocess
 
 GNAMES_ADDR = 0x142418148
@@ -464,12 +465,16 @@ class RLMemoryReader:
             return None
         self.mem_file.seek(actor_ptr + OFFSET_LOCATION)
         x, y, z = struct.unpack("<fff", self.mem_file.read(12))
+        if math.isnan(x) or math.isnan(y) or math.isnan(z) or abs(x) > 100000.0 or abs(y) > 100000.0:
+            return None
 
         self.mem_file.seek(actor_ptr + OFFSET_ROTATION)
         pitch, yaw, roll = struct.unpack("<iii", self.mem_file.read(12))
 
         self.mem_file.seek(actor_ptr + OFFSET_VELOCITY)
         vx, vy, vz = struct.unpack("<fff", self.mem_file.read(12))
+        if math.isnan(vx) or math.isnan(vy) or math.isnan(vz):
+            return None
 
         speed = (vx**2 + vy**2 + vz**2) ** 0.5
         # Convert Unreal Engine rotation units (65536 = 360 deg) to degrees

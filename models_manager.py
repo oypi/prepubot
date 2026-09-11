@@ -93,6 +93,45 @@ class BotModelManager:
             self.bot_name = bot_name
             self._init_bot()
 
+    @staticmethod
+    def _populate_car_slot(slot, car_state: dict, team: int):
+        c_pos = car_state["pos"]
+        c_vel = car_state["vel"]
+        c_ang = car_state.get("ang_vel", np.zeros(3, dtype=np.float32))
+
+        slot.physics.location.x = float(c_pos[0])
+        slot.physics.location.y = float(c_pos[1])
+        slot.physics.location.z = float(c_pos[2])
+        slot.physics.velocity.x = float(c_vel[0])
+        slot.physics.velocity.y = float(c_vel[1])
+        slot.physics.velocity.z = float(c_vel[2])
+        slot.physics.angular_velocity.x = float(c_ang[0])
+        slot.physics.angular_velocity.y = float(c_ang[1])
+        slot.physics.angular_velocity.z = float(c_ang[2])
+
+        # Exact Unreal Engine FRotator (pitch, yaw, roll) in radians
+        if "rot" in car_state and car_state["rot"] is not None:
+            p, y, r = car_state["rot"]
+        elif "quat" in car_state and car_state["quat"] is not None:
+            qx, qy, qz, qw = car_state["quat"]
+            p, y, r = quat_to_euler(qx, qy, qz, qw)
+        else:
+            fw = car_state.get("fw", np.array([1.0, 0.0, 0.0]))
+            y = math.atan2(fw[1], fw[0])
+            p = math.asin(max(-1.0, min(1.0, fw[2])))
+            r = 0.0
+
+        slot.physics.rotation.pitch = float(p)
+        slot.physics.rotation.yaw = float(y)
+        slot.physics.rotation.roll = float(r)
+
+        slot.team = int(team)
+        slot.has_wheel_contact = bool(car_state.get("on_ground", 1.0) > 0.5)
+        slot.jumped = bool(car_state.get("jumped", False))
+        slot.double_jumped = bool(car_state.get("double_jumped", False))
+        slot.boost = int(round(car_state.get("boost", 0.0) * 100.0))
+        slot.is_super_sonic = bool(np.linalg.norm(c_vel) >= 2200.0)
+
     def build_packet(self, car_state: dict, ball_state: dict, mates: list, opps: list, boost_timers: np.ndarray) -> GameTickPacket:
         packet = GameTickPacket()
         now = time.perf_counter()
@@ -132,83 +171,33 @@ class BotModelManager:
         packet.game_ball.physics.angular_velocity.y = float(b_ang[1])
         packet.game_ball.physics.angular_velocity.z = float(b_ang[2])
 
-        if "rot" in ball_state:
+        if "rot" in ball_state and ball_state["rot"] is not None:
             packet.game_ball.physics.rotation.pitch = float(ball_state["rot"][0])
             packet.game_ball.physics.rotation.yaw = float(ball_state["rot"][1])
             packet.game_ball.physics.rotation.roll = float(ball_state["rot"][2])
 
-        # Self Car (Index 0)
-        packet.num_cars = 1
-        p_self = packet.game_cars[0]
-        c_pos = car_state["pos"]
-        c_vel = car_state["vel"]
-        c_ang = car_state.get("ang_vel", np.zeros(3, dtype=np.float32))
-        p_self.physics.location.x = float(c_pos[0])
-        p_self.physics.location.y = float(c_pos[1])
-        p_self.physics.location.z = float(c_pos[2])
-        p_self.physics.velocity.x = float(c_vel[0])
-        p_self.physics.velocity.y = float(c_vel[1])
-        p_self.physics.velocity.z = float(c_vel[2])
-        p_self.physics.angular_velocity.x = float(c_ang[0])
-        p_self.physics.angular_velocity.y = float(c_ang[1])
-        p_self.physics.angular_velocity.z = float(c_ang[2])
+        # 1. Player Car (self at index 0)
+        self._populate_car_slot(packet.game_cars[0], car_state, self.team)
 
-        # Exact Unreal Engine FRotator (pitch, yaw, roll) from 0x9C
-        if "rot" in car_state:
-            p, y, r = car_state["rot"]
-        elif "quat" in car_state:
-            qx, qy, qz, qw = car_state["quat"]
-            p, y, r = quat_to_euler(qx, qy, qz, qw)
+        # 2. Opponent slot: For 1v1 models (Nexto, Seer, Element), select the tactically matched
+        # opponent based on ball distance role ranking. This eliminates out-of-distribution teammate
+        # tokens that cause multi-head attention twitching/tweaking in multi-player (2v2/3v3) matches,
+        # while ensuring Seer and Nexto always face the correct primary challenge.
+        active_opps = [o for o in opps if o is not None and isinstance(o, dict) and "pos" in o]
+        if not active_opps:
+            # 1v0 / Freeplay mode
+            packet.num_cars = 1
         else:
-            fw = car_state.get("fw", np.array([1.0, 0.0, 0.0]))
-            y = math.atan2(fw[1], fw[0])
-            p = math.asin(max(-1.0, min(1.0, fw[2])))
-            r = 0.0
+            active_mates = [car_state] + [m for m in mates if m is not None and isinstance(m, dict) and "pos" in m]
+            active_mates.sort(key=lambda p: float(np.linalg.norm(b_pos - p["pos"])))
+            active_opps.sort(key=lambda p: float(np.linalg.norm(b_pos - p["pos"])))
 
-        p_self.physics.rotation.pitch = float(p)
-        p_self.physics.rotation.yaw = float(y)
-        p_self.physics.rotation.roll = float(r)
-        p_self.has_wheel_contact = bool(car_state.get("on_ground", 1.0) > 0.5)
-        p_self.jumped = bool(car_state.get("jumped", False))
-        p_self.double_jumped = bool(car_state.get("double_jumped", False))
-        p_self.boost = int(round(car_state.get("boost", 0.0) * 100.0))
-        p_self.team = self.team
-        p_self.is_super_sonic = bool(np.linalg.norm(c_vel) >= 2200.0)
+            # Grab opponent in the corresponding tactical depth relative to teammates
+            my_role_idx = next((i for i, m in enumerate(active_mates) if m is car_state), 0)
+            matched_opp = active_opps[min(my_role_idx, len(active_opps) - 1)]
 
-        # Other cars (Teammates + Opponents)
-        car_idx = 1
-        for m in mates:
-            if m is None or car_idx >= 64:
-                continue
-            pm = packet.game_cars[car_idx]
-            pm.physics.location.x = float(m["pos"][0])
-            pm.physics.location.y = float(m["pos"][1])
-            pm.physics.location.z = float(m["pos"][2])
-            pm.physics.velocity.x = float(m["vel"][0])
-            pm.physics.velocity.y = float(m["vel"][1])
-            pm.physics.velocity.z = float(m["vel"][2])
-            pm.team = self.team
-            pm.has_wheel_contact = bool(m.get("on_ground", 1.0) > 0.5)
-            pm.boost = int(round(m.get("boost", 0.0) * 100.0))
-            car_idx += 1
-
-        for o in opps:
-            if o is None or car_idx >= 64:
-                continue
-            po = packet.game_cars[car_idx]
-            po.physics.location.x = float(o["pos"][0])
-            po.physics.location.y = float(o["pos"][1])
-            po.physics.location.z = float(o["pos"][2])
-            po.physics.velocity.x = float(o["vel"][0])
-            po.physics.velocity.y = float(o["vel"][1])
-            po.physics.velocity.z = float(o["vel"][2])
-            po.team = 1 - self.team
-            po.has_wheel_contact = bool(o.get("on_ground", 1.0) > 0.5)
-            po.boost = int(round(o.get("boost", 0.0) * 100.0))
-            car_idx += 1
-
-        # Real match car count: in Freeplay, num_cars = 1 (Nexto pads missing players with zeros natively)
-        packet.num_cars = car_idx
+            self._populate_car_slot(packet.game_cars[1], matched_opp, 1 - self.team)
+            packet.num_cars = 2
 
         # Boost Pads
         packet.num_boost = 34

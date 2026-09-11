@@ -9,6 +9,7 @@ import sys
 import os
 import time
 import signal
+import math
 import numpy as np
 import subprocess
 import argparse
@@ -84,6 +85,9 @@ def check_game_window_focused():
 # Base sequence is calibrated for LEFT diagonal spawn:
 # drives forward, steers slightly away (left), jumps, diagonal dodges towards ball (right),
 # cancels flip immediately, recovers roll to land flat.
+# Frame-accurate speedflip kickoff sequence from Nexto (164 ticks @ 120Hz = 1.37s)
+# Base calibrated for LEFT diagonal spawn: steer slightly left, jump, diagonal dodge right, flip cancel, land flat.
+# action format: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
 DIAGONAL_KICKOFF_SEQUENCE = np.array(
     11 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Drive & boost (0..44 ticks)
     + 3 * 4 * [[1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Steer slightly away from center (44..56 ticks)
@@ -91,13 +95,16 @@ DIAGONAL_KICKOFF_SEQUENCE = np.array(
     + 1 * 4 * [[1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0]]  # Release jump (64..68 ticks)
     + 1 * 4 * [[1.0,  0.0, -0.7,  0.8,  0.8, 1, 1, 0]]  # Diagonal flip towards ball (68..72 ticks)
     + 13 * 4 * [[1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0]]  # Flip cancel (pitch up) (72..124 ticks)
-    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 0]], # Air roll recovery (124..164 ticks)
+    + 10 * 4 * [[1.0,  0.0,  0.5,  0.0,  1.0, 0, 0, 1]], # Air roll recovery + powerslide cushion (124..164 ticks)
     dtype=np.float32
 )
 
 
 class KickoffController:
-    """Manages kickoff detection, countdown priming, left-goes taker arbitration, and speedflips."""
+    """
+    Kickoff controller executing frame-accurate speedflips exclusively on Diagonal Kickoffs (|x| > 800).
+    Non-diagonal spawns (off-center, center) are handled directly by Nexto's neural policy.
+    """
     def __init__(self):
         self.active = False
         self.tick = 0
@@ -108,28 +115,40 @@ class KickoffController:
     def reset(self):
         self.active = False
         self.tick = 0
+        self.start_time = 0.0
+        self.mirror = False
         self.current_seq = None
 
     def step(self, car, ball, mates, team: int, now: float):
         """
-        Returns (kickoff_action, act_str) if kickoff handling is active, else (None, None).
+        Returns (kickoff_action, act_str) if diagonal speedflip is active, else (None, None).
         """
-        ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
+        ball_pos = ball["pos"]
+        ball_dist_center = float(np.linalg.norm(ball_pos[:2]))
         ball_spd = float(np.linalg.norm(ball["vel"]))
-        is_kickoff_ball = (ball_dist_center < 35.0 and ball_spd < 50.0)
+        is_kickoff_ball = (ball_dist_center < 45.0 and ball_spd < 50.0)
 
-        if not is_kickoff_ball or ball_dist_center > 60.0 or ball_spd > 150.0:
+        dist_to_ball = float(np.linalg.norm(car["pos"] - ball_pos))
+        car_spd = float(np.linalg.norm(car["vel"]))
+
+        # Kickoff ends when ball is struck or moves significantly
+        if not is_kickoff_ball or ball_spd > 150.0 or ball_dist_center > 75.0:
             self.reset()
             return None, None
 
-        dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
-        car_spd = float(np.linalg.norm(car["vel"]))
+        if dist_to_ball > 1200.0 and not self.active:
+            # Check spawn position: ONLY activate for Diagonal spawns (|x| > 800)
+            car_x = float(car["pos"][0])
+            abs_x = abs(car_x)
+            if abs_x <= 800.0:
+                self.reset()
+                return None, None
 
-        if dist_to_ball > 1500.0 and car.get("on_ground", 1.0) > 0.5 and not self.active:
+            # Check if this car is the kickoff taker (closest, or left-goes if tied)
             my_xy_dist = float(np.linalg.norm(car["pos"][:2]))
             is_taker = True
             for mate in mates:
-                if mate is not None:
+                if mate is not None and isinstance(mate, dict) and "pos" in mate:
                     m_dist = float(np.linalg.norm(mate["pos"][:2]))
                     if m_dist < my_xy_dist - 40.0:
                         is_taker = False
@@ -146,45 +165,31 @@ class KickoffController:
                     # Countdown frozen: hold throttle and boost so car launches instantly on GO!
                     return [1.0, 0.0, 0.0, 0.0, 0.0, 0, 1, 0], "KICKOFF READY"
                 else:
-                    # Countdown ended, car is moving:
-                    car_x = float(car["pos"][0])
-                    abs_x = abs(car_x)
-                    # For Blue (team 0): +X is Right spawn, -X is Left spawn.
-                    # For Orange (team 1): -X is Right spawn, +X is Left spawn.
-                    # Base sequence is for Left spawn (dodges right towards ball).
-                    # Right spawn needs mirroring (dodges left towards ball).
+                    # Countdown ended, car is moving: execute diagonal speedflip
                     is_spawn_right = (car_x > 0.0) if team == 0 else (car_x < 0.0)
-
-                    # Diagonal spawns (|x| > 1000) use the speedflip sequence
-                    if abs_x > 1000.0:
-                        self.current_seq = DIAGONAL_KICKOFF_SEQUENCE
-                        self.mirror = is_spawn_right
-                        self.active = True
-                        self.tick = 0
-                        self.start_time = now
+                    self.active = True
+                    self.start_time = now
+                    self.tick = 0
+                    self.current_seq = DIAGONAL_KICKOFF_SEQUENCE
+                    self.mirror = is_spawn_right
 
         if self.active and self.current_seq is not None:
-            # Transfer control to AI model as soon as the speedflip lands or approaches ball
-            # This guarantees the bot model aligns its wheels and hits the ball dead-center!
-            if dist_to_ball < 620.0 or (self.tick >= 76 and car.get("on_ground", 1.0) > 0.5):
-                self.reset()
-                return None, None
-
             ticks_elapsed = int((now - self.start_time) * 120.0)
-            self.tick = min(ticks_elapsed, len(self.current_seq))
+            self.tick = ticks_elapsed
+
             if self.tick < len(self.current_seq):
                 raw_act = self.current_seq[self.tick].copy()
                 if self.mirror:
                     raw_act[1] = -raw_act[1]  # Invert steer
                     raw_act[3] = -raw_act[3]  # Invert yaw
                     raw_act[4] = -raw_act[4]  # Invert roll
-                act_str = f"SPEEDFLIP DIAG [{self.tick + 1}/{len(self.current_seq)}]"
-                return raw_act, act_str
+                return raw_act, f"SPEEDFLIP DIAG [{self.tick + 1}/{len(self.current_seq)}]"
             else:
                 self.reset()
                 return None, None
 
         return None, None
+
 
 
 def action_to_act_str(ctrl):
@@ -263,7 +268,7 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
                         act_str = "IDLE"
                         controller.reset()
                 elif cmd == "set_beta":
-                    beta = float(msg.get("beta", 1.0))
+                    beta = max(0.0, min(1.0, float(msg.get("beta", 1.0))))
                     if hasattr(bot_manager.bot, "beta"):
                         bot_manager.bot.beta = beta
                 elif cmd == "set_bot":

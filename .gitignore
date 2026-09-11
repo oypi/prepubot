@@ -32,5 +32,7 @@ nexto_gui/embedded_backend/
 # Match telemetry & debug logs
 match_debug.jsonl*
 *.jsonl
+*.log
+
 
 

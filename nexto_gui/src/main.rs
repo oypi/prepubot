@@ -36,6 +36,35 @@ fn get_embedded_backend() -> &'static [u8] {
     }
 }
 
+fn find_dev_script(current_exe: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("NEXTO_SCRIPT_PATH") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("nexto_play.py");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Check executable directory and up to 4 parent levels (e.g. target/release/ -> ../../../nexto_play.py)
+    let mut cur = current_exe.parent();
+    for _ in 0..4 {
+        if let Some(dir) = cur {
+            let p = dir.join("nexto_play.py");
+            if p.exists() {
+                return Some(p);
+            }
+            cur = dir.parent();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 fn extract_backend_if_needed() -> Result<PathBuf, String> {
     // 1. Developer mode: If running via `cargo run` (binary inside target/) or PREPUBOT_DEV is set,
     // prefer running nexto_play.py directly with system python3 for instant code changes.
@@ -43,15 +72,8 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
     let is_cargo_dev = current_exe.to_string_lossy().contains("/target/") || std::env::var("PREPUBOT_DEV").is_ok();
 
     if is_cargo_dev {
-        if let Ok(cwd) = std::env::current_dir() {
-            let dev_path = cwd.join("nexto_play.py");
-            if dev_path.exists() {
-                return Ok(dev_path);
-            }
-        }
-        let default_dev = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
-        if default_dev.exists() {
-            return Ok(default_dev);
+        if let Some(p) = find_dev_script(&current_exe) {
+            return Ok(p);
         }
     }
 
@@ -109,20 +131,14 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
         return Ok(backend_path);
     }
 
-    // Developer fallback: check nexto_play.py in current or parent dirs
-    if let Ok(cwd) = std::env::current_dir() {
-        let dev_path = cwd.join("nexto_play.py");
-        if dev_path.exists() {
-            return Ok(dev_path);
-        }
-    }
-    let default_dev = PathBuf::from("/home/oneypi/Documents/memory_reading/nexto_play.py");
-    if default_dev.exists() {
-        return Ok(default_dev);
+    // Developer fallback: check nexto_play.py dynamically
+    if let Some(p) = find_dev_script(&current_exe) {
+        return Ok(p);
     }
 
     Err("Could not find nexto_backend executable or nexto_play.py".to_string())
 }
+
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CarTelemetry {

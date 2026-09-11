@@ -27,10 +27,13 @@ class VirtualXboxController:
             ]
         }
         self.ui = UInput(cap, name="Microsoft X-Box 360 pad", vendor=0x045e, product=0x028e, version=0x110)
+        self.prev_jump = False
+        self.air_tick = 0
         self.reset()
 
     def reset(self):
         """Release all buttons and center analog axes."""
+        self.air_tick = 0
         # Analog sticks
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, 0)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, 0)
@@ -77,56 +80,79 @@ class VirtualXboxController:
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, rt)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, lt)
 
+        if on_ground:
+            self.air_tick = 0
+        else:
+            self.air_tick += 1
+
         if on_ground and not jump_val:
-            # Normal ground driving: stick X steers, stick Y centered
+            # Normal driving on floor or wall:
+            # stick_x drives the wheels (steering).
+            # stick_y is kept neutral (0) so car tracks flat and never drags nose on turf
             stick_x = int(steer_val * 32767)
             stick_y = 0
-            roll_left = 0
-            roll_right = 0
             air_roll_btn = 0
         else:
-            # Airborne or jumping/flipping
+            # Airborne, or jumping/flipping/wavedashing:
             if jump_val:
-                # DODGE / FLIP frame:
-                # In Rocket League, DodgeForward is -pitch, DodgeRight is roll!
-                # If roll is ~0, stick_x MUST BE 0 to guarantee clean straight flips/flicks!
-                # Never let residual steering or yaw trigger an accidental sideflip!
+                # DODGE / FLIP / WAVEDASH frame:
+                # Lateral dodge direction: prefer roll, then yaw, then steering into the jump
                 if abs(roll_val) > 0.1:
                     stick_x = int(roll_val * 32767)
+                elif abs(yaw_val) > 0.1:
+                    stick_x = int(yaw_val * 32767)
                 else:
-                    stick_x = 0
+                    stick_x = int(steer_val * 32767)
 
                 # Xbox gamepad: ABS_Y negative = stick UP = pitch nose down
                 stick_y = int(pitch_val * 32767)
-                roll_left = 0
-                roll_right = 0
                 air_roll_btn = 0
             else:
-                # Free aerial flight / flip cancel / recovery
-                if abs(roll_val) > 0.1:
-                    # When rolling in the air, deflect stick_x and engage Air Roll (BTN_X + directional bumpers)
+                # Free aerial flight / flip cancel / aerial recovery:
+                has_roll = abs(roll_val) > 0.15
+                has_yaw = abs(yaw_val) > 0.15
+
+                if has_roll and has_yaw:
+                    # Both yaw and roll requested by Nexto policy:
+                    # If one axis is clearly dominant, execute that axis
+                    if abs(yaw_val) > 1.8 * abs(roll_val):
+                        stick_x = int(yaw_val * 32767)
+                        air_roll_btn = 0
+                    elif abs(roll_val) > 1.8 * abs(yaw_val):
+                        stick_x = int(roll_val * 32767)
+                        air_roll_btn = 1
+                    else:
+                        # Time-share across 2-tick intervals (16ms each at 120Hz).
+                        # Angular momentum smoothly integrates both torques, allowing simultaneous
+                        # nose alignment (yaw) and wheel leveling (roll)!
+                        if (self.air_tick % 4) < 2:
+                            stick_x = int(yaw_val * 32767)
+                            air_roll_btn = 0
+                        else:
+                            stick_x = int(roll_val * 32767)
+                            air_roll_btn = 1
+                elif has_roll:
                     stick_x = int(roll_val * 32767)
                     air_roll_btn = 1
-                    roll_left = 1 if roll_val < -0.1 else 0
-                    roll_right = 1 if roll_val > 0.1 else 0
                 else:
-                    stick_x = int(yaw_val * 32767) if abs(yaw_val) > 0.1 else int(steer_val * 32767)
+                    stick_x = int(yaw_val * 32767) if has_yaw else int(steer_val * 32767)
                     air_roll_btn = 0
-                    roll_left = 0
-                    roll_right = 0
 
                 stick_y = int(pitch_val * 32767)
 
-        # Powerslide on ground or Air Roll in the air
-        btn_x = 1 if ((handbrake_val and on_ground) or air_roll_btn) else 0
+        # Powerslide:
+        # Pre-engage powerslide when landing (car_z < 120.0 with handbrake requested)
+        # so wheels touch down frictionlessly without scrubbing momentum!
+        is_landing = (car_z < 120.0) and handbrake_val
+        btn_x = 1 if ((handbrake_val and on_ground) or is_landing or air_roll_btn) else 0
 
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, max(-32768, min(32767, stick_x)))
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, max(-32768, min(32767, stick_y)))
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, 1 if jump_val else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_B, 1 if boost_val else 0)
         self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, btn_x)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, roll_left)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TR, roll_right)
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, 0)
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TR, 0)
         self.ui.syn()
         self.prev_jump = jump_val
 

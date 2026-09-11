@@ -1,0 +1,6 @@
+dist
+build
+functions.txt
+config.json
+__pycache__
+**/*.pyc

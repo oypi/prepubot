@@ -232,10 +232,12 @@ class NextoDriver:
                 is_grounded_flag = bool(flags & 0x10)
                 double_jumped = bool(flags & 0x08)
                 jumped = bool(flags & 0x04)
-                if is_grounded_flag or (z < 25.0 and abs(vz) < 80.0):
+                if is_grounded_flag:
+                    on_ground = 1.0
+                elif z < 25.0 and abs(vz) < 50.0 and up[2] > 0.4:
                     on_ground = 1.0
             except Exception:
-                if z < 25.0 and abs(vz) < 80.0:
+                if z < 25.0 and abs(vz) < 50.0 and up[2] > 0.4:
                     on_ground = 1.0
 
             # DoubleJumps counter from Car_TA at 0xADC
