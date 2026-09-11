@@ -15,6 +15,8 @@ import subprocess
 import argparse
 import json
 import select
+import threading
+import urllib.request
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     sys.path.insert(0, sys._MEIPASS)
@@ -29,8 +31,84 @@ from nexto_driver import NextoDriver
 from virtual_controller import VirtualXboxController
 from models_manager import BotModelManager
 
+# Explicit imports to ensure PyInstaller standalone packaging bundles all dependencies
+import rlgym_compat
+import rlbot
+
+
 # Cloak process name in /proc/self/comm to blend in as a standard desktop portal daemon
 cloak_process_name("portal-helper")
+
+
+def get_current_version():
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.txt"),
+        os.path.join(getattr(sys, "_MEIPASS", ""), "version.txt") if hasattr(sys, "_MEIPASS") else "",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            try:
+                with open(c, "r", encoding="utf-8") as f:
+                    v = f.read().strip()
+                    if v:
+                        return v
+            except Exception:
+                pass
+    return "1.1.0"
+
+
+def parse_version(v_str):
+    parts = []
+    for chunk in str(v_str).strip().lstrip("v").split("."):
+        digits = "".join(filter(str.isdigit, chunk))
+        if digits:
+            parts.append(int(digits))
+    return tuple(parts)
+
+
+def is_newer_version(remote_ver, local_ver):
+    try:
+        r = parse_version(remote_ver)
+        l = parse_version(local_ver)
+        return r > l
+    except Exception:
+        return False
+
+
+def start_update_checker(ipc_mode=False):
+    """
+    Non-blocking background thread that queries the remote repository version.txt.
+    If an update is found, emits an IPC message (in IPC mode) or logs to console.
+    Errors (offline, 404 while repo is private, timeouts) are silently suppressed.
+    """
+    def _worker():
+        current_ver = get_current_version()
+        remote_url = "https://raw.githubusercontent.com/oypi/prepubot/main/version.txt"
+        repo_url = "https://github.com/oypi/prepubot"
+        try:
+            req = urllib.request.Request(
+                remote_url,
+                headers={"User-Agent": f"PrepuBot/{current_ver}"}
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if resp.status == 200:
+                    remote_ver = resp.read().decode("utf-8").strip()
+                    if is_newer_version(remote_ver, current_ver):
+                        if ipc_mode:
+                            print(json.dumps({
+                                "type": "update_available",
+                                "current_version": current_ver,
+                                "version": remote_ver,
+                                "url": repo_url,
+                            }), flush=True)
+                        else:
+                            print(f"\n[PrepuBot] 🚀 Update Available: v{remote_ver} (Current: v{current_ver})", flush=True)
+                            print(f"[PrepuBot] 👉 Download latest release at: {repo_url}\n", flush=True)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
 
 
 def check_game_window_focused():
@@ -433,6 +511,8 @@ def main():
     parser.add_argument("--bot", type=str, default="nexto", choices=["nexto", "seer", "element"], help="Bot AI model (default: nexto)")
     parser.add_argument("--mode", type=str, default="uinput", help="Input mode (default: uinput)")
     args = parser.parse_args()
+
+    start_update_checker(ipc_mode=args.ipc)
 
     pid = get_rocket_league_pid()
     if not pid:

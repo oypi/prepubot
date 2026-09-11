@@ -6,14 +6,19 @@ Reads live coordinates, orientation, and velocity directly from the game's memor
 
 import sys
 import os
+import json
 import struct
 import time
 import math
 import subprocess
 
-GNAMES_ADDR = 0x142418148
-GOBJECTS_ADDR = 0x142418190
-GOBJECTS_COUNT_ADDR = 0x142418198
+DEFAULT_GNAMES_ADDR = 0x142418148
+DEFAULT_GOBJECTS_ADDR = 0x142418190
+DEFAULT_GOBJECTS_COUNT_ADDR = 0x142418198
+
+GNAMES_ADDR = DEFAULT_GNAMES_ADDR
+GOBJECTS_ADDR = DEFAULT_GOBJECTS_ADDR
+GOBJECTS_COUNT_ADDR = DEFAULT_GOBJECTS_COUNT_ADDR
 
 # Property offsets discovered from engine reflection (AActor)
 OFFSET_LOCATION = 0x90     # FVector: float X, float Y, float Z
@@ -137,10 +142,15 @@ class StealthMemIO:
                     f"Linux kernel security (ptrace_scope) restricted memory reading.\n"
                     f"Fix: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or grant CAP_SYS_PTRACE."
                 )
-        if not self._fallback_file:
-            self._fallback_file = open(f"/proc/{self.pid}/mem", "rb")
-        self._fallback_file.seek(address)
-        return self._fallback_file.read(size)
+            if errno == 14:  # EFAULT: Bad address / unmapped memory
+                return b""
+        try:
+            if not self._fallback_file:
+                self._fallback_file = open(f"/proc/{self.pid}/mem", "rb")
+            self._fallback_file.seek(address)
+            return self._fallback_file.read(size)
+        except OSError:
+            return b""
 
     def close(self):
         if self._fallback_file:
@@ -149,6 +159,48 @@ class StealthMemIO:
             except Exception:
                 pass
             self._fallback_file = None
+
+
+def verify_offsets(mem_io, gnames_addr, gobjects_addr):
+    """
+    Verifies that the provided GNames and GObjects addresses are valid for the active Rocket League engine.
+    Checks:
+    1. GNames[1] points to FNameEntry where string is "ByteProperty" (UTF-16LE).
+    2. GObjects points to a valid TArray<UObject*> with realistic object count (40,000 - 600,000).
+    Execution time: < 0.5ms.
+    """
+    try:
+        raw_gnames = mem_io.read_bytes(gnames_addr, 8)
+        if len(raw_gnames) < 8:
+            return False
+        gnames_ptr = struct.unpack("<Q", raw_gnames)[0]
+        if not (0x10000 < gnames_ptr < 0x7fffffffffff):
+            return False
+
+        raw_entry1 = mem_io.read_bytes(gnames_ptr + 8, 8)
+        if len(raw_entry1) < 8:
+            return False
+        entry1_ptr = struct.unpack("<Q", raw_entry1)[0]
+        if not (0x10000 < entry1_ptr < 0x7fffffffffff):
+            return False
+
+        sig = "ByteProperty".encode("utf-16le")
+        raw_sig = mem_io.read_bytes(entry1_ptr + 0x18, len(sig))
+        if raw_sig != sig:
+            return False
+
+        raw_gobj = mem_io.read_bytes(gobjects_addr, 16)
+        if len(raw_gobj) < 16:
+            return False
+        gobj_ptr, gobj_count = struct.unpack("<QI", raw_gobj[:12])
+        if not (0x10000 < gobj_ptr < 0x7fffffffffff):
+            return False
+        if not (40000 <= gobj_count <= 600000):
+            return False
+
+        return True
+    except Exception:
+        return False
 
 
 class RLMemoryReader:
@@ -163,20 +215,152 @@ class RLMemoryReader:
                 f"Fix: Run 'echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope' or run prepubot with sudo."
             ) from e
         self.names_cache = {}
+        self.gnames_addr = GNAMES_ADDR
+        self.gobjects_addr = GOBJECTS_ADDR
+        self.gobjects_count_addr = GOBJECTS_COUNT_ADDR
         self.resolve_globals()
 
+    def auto_recover_offsets(self):
+        """
+        Scans Rocket League memory mappings for GNames and GObjects tables.
+        Only executed if verified offsets and cached offsets fail.
+        Typically finishes in ~1.4 seconds.
+        """
+        data_segments = []
+        base_exe = None
+        try:
+            with open(f"/proc/{self.pid}/maps", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    start, end = [int(x, 16) for x in parts[0].split("-")]
+                    perms = parts[1]
+                    path = parts[-1] if len(parts) > 5 else ""
+                    if "rocketleague.exe" in path.lower() and base_exe is None:
+                        base_exe = start
+                    if base_exe and base_exe <= start < base_exe + 0x30000000:
+                        if perms == "rw-p" and (end - start) < 20 * 1024 * 1024:
+                            data_segments.append((start, end))
+        except Exception as e:
+            print(f"[PrepuBot] Failed to parse /proc/{self.pid}/maps: {e}", flush=True)
+
+        if not data_segments:
+            # Fallback for Wine/Proton configurations where image path is blank
+            try:
+                with open(f"/proc/{self.pid}/maps", "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if not parts:
+                            continue
+                        start, end = [int(x, 16) for x in parts[0].split("-")]
+                        perms = parts[1]
+                        if 0x140000000 <= start < 0x160000000 and perms == "rw-p" and (end - start) < 20 * 1024 * 1024:
+                            data_segments.append((start, end))
+            except Exception:
+                pass
+
+        sig = "ByteProperty".encode("utf-16le")
+        recovered_gnames = None
+        recovered_gobjects = None
+
+        for seg_start, seg_end in data_segments:
+            raw_data = self.mem_file.read_bytes(seg_start, seg_end - seg_start)
+            if not raw_data:
+                continue
+
+            # 1. Scan for GNames
+            for i in range(0, len(raw_data) - 8, 8):
+                ptr = struct.unpack("<Q", raw_data[i : i + 8])[0]
+                if 0x10000 < ptr < 0x7fffffffffff:
+                    entry1_raw = self.mem_file.read_bytes(ptr + 8, 8)
+                    if len(entry1_raw) == 8:
+                        e1 = struct.unpack("<Q", entry1_raw)[0]
+                        if 0x10000 < e1 < 0x7fffffffffff:
+                            s = self.mem_file.read_bytes(e1 + 0x18, len(sig))
+                            if s == sig:
+                                recovered_gnames = seg_start + i
+                                break
+
+            if recovered_gnames:
+                # 2. Scan for GObjects
+                for j in range(0, len(raw_data) - 16, 8):
+                    addr = seg_start + j
+                    if addr == recovered_gnames:
+                        continue
+                    ptr, count, max_count = struct.unpack("<QII", raw_data[j : j + 16])
+                    if 0x10000 < ptr < 0x7fffffffffff and 40000 <= count <= 600000 and count <= max_count <= count * 3:
+                        test_obj_raw = self.mem_file.read_bytes(ptr + 100 * 8, 8)
+                        if len(test_obj_raw) == 8:
+                            obj = struct.unpack("<Q", test_obj_raw)[0]
+                            if 0x10000 < obj < 0x7fffffffffff:
+                                n_raw = self.mem_file.read_bytes(obj + 0x48, 4)
+                                if len(n_raw) == 4:
+                                    n_idx = struct.unpack("<I", n_raw)[0]
+                                    if 0 < n_idx < 100000:
+                                        recovered_gobjects = addr
+                                        break
+                break
+
+        return recovered_gnames, recovered_gobjects
+
     def resolve_globals(self):
-        self.mem_file.seek(GNAMES_ADDR)
+        global GNAMES_ADDR, GOBJECTS_ADDR, GOBJECTS_COUNT_ADDR
+
+        # 1. First, verify static known offsets (< 0.5ms)
+        if not verify_offsets(self.mem_file, self.gnames_addr, self.gobjects_addr):
+            cache_dir = os.path.expanduser("~/.cache/prepubot")
+            cache_file = os.path.join(cache_dir, "offsets.json")
+            cached_valid = False
+
+            # 2. Try disk-cached offsets
+            if os.path.isfile(cache_file):
+                try:
+                    with open(cache_file, "r") as f:
+                        data = json.load(f)
+                        c_gnames = int(data.get("gnames", 0))
+                        c_gobjects = int(data.get("gobjects", 0))
+                        if verify_offsets(self.mem_file, c_gnames, c_gobjects):
+                            self.gnames_addr = c_gnames
+                            self.gobjects_addr = c_gobjects
+                            self.gobjects_count_addr = c_gobjects + 8
+                            cached_valid = True
+                except Exception:
+                    pass
+
+            # 3. If verified static and cache failed, run automatic offset recovery
+            if not cached_valid:
+                print("[PrepuBot] ⚠️ Verified offsets failed (game recompiled or updated). Starting auto offset recovery...", flush=True)
+                rec_gnames, rec_gobjects = self.auto_recover_offsets()
+                if rec_gnames and rec_gobjects:
+                    self.gnames_addr = rec_gnames
+                    self.gobjects_addr = rec_gobjects
+                    self.gobjects_count_addr = rec_gobjects + 8
+                    print(f"[PrepuBot] ✅ Recovered offsets successfully! GNames={hex(rec_gnames)}, GObjects={hex(rec_gobjects)}", flush=True)
+                    try:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        with open(cache_file, "w") as f:
+                            json.dump({"gnames": rec_gnames, "gobjects": rec_gobjects}, f)
+                    except Exception:
+                        pass
+                else:
+                    print("[PrepuBot] ❌ Auto offset recovery could not find Unreal Engine tables.", flush=True)
+
+        GNAMES_ADDR = self.gnames_addr
+        GOBJECTS_ADDR = self.gobjects_addr
+        GOBJECTS_COUNT_ADDR = self.gobjects_count_addr
+
+        self.mem_file.seek(self.gnames_addr)
         self.gnames_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
 
-        self.mem_file.seek(GOBJECTS_ADDR)
+        self.mem_file.seek(self.gobjects_addr)
         raw = self.mem_file.read(16)
         if len(raw) >= 12:
             self.gobjects_ptr, self.gobjects_count = struct.unpack("<QI", raw[:12])
         else:
-            self.mem_file.seek(GOBJECTS_ADDR)
+            self.mem_file.seek(self.gobjects_addr)
             self.gobjects_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
-            self.mem_file.seek(GOBJECTS_COUNT_ADDR)
+            self.mem_file.seek(self.gobjects_count_addr)
             self.gobjects_count = struct.unpack("<I", self.mem_file.read(4))[0]
 
     def get_name(self, name_idx):

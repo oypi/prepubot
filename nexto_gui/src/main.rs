@@ -206,6 +206,10 @@ pub struct TelemetryMsg {
     pub action: String,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 pub struct SharedState {
@@ -229,6 +233,7 @@ pub struct SharedState {
     pub action: String,
     pub status_msg: String,
     pub permission_alert: Option<String>,
+    pub update_available: Option<(String, String)>,
     pub beta: f32,
 }
 
@@ -255,6 +260,7 @@ impl Default for SharedState {
             action: "IDLE".to_string(),
             status_msg: "Connecting to Rocket League...".to_string(),
             permission_alert: None,
+            update_available: None,
             beta: 1.0,
         }
     }
@@ -402,6 +408,10 @@ impl PrepuBotApp {
                                         } else {
                                             s.status_msg = raw_msg;
                                         }
+                                    } else if telemetry.msg_type == "update_available" {
+                                        let ver = telemetry.version.unwrap_or_else(|| "latest".to_string());
+                                        let url = telemetry.url.unwrap_or_else(|| "https://github.com/oypi/prepubot".to_string());
+                                        s.update_available = Some((ver, url));
                                     }
                                 }
                             } else {
@@ -535,6 +545,7 @@ impl eframe::App for PrepuBotApp {
         let action = state_guard.action.clone();
         let status_msg = state_guard.status_msg.clone();
         let permission_alert = state_guard.permission_alert.clone();
+        let update_available = state_guard.update_available.clone();
         let mut beta = state_guard.beta;
         drop(state_guard);
 
@@ -617,6 +628,35 @@ impl eframe::App for PrepuBotApp {
                             }
                         });
                     });
+
+                    // Update Available Banner (if newer version detected)
+                    if let Some((ref update_ver, ref update_url)) = update_available {
+                        egui::Frame {
+                            inner_margin: egui::Margin::symmetric(14, 10),
+                            corner_radius: egui::CornerRadius::same(6),
+                            fill: egui::Color32::from_rgb(16, 28, 44),
+                            stroke: egui::Stroke::new(1.2, egui::Color32::from_rgb(45, 130, 230)),
+                            ..Default::default()
+                        }
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("🚀 UPDATE AVAILABLE (v{})", update_ver))
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(100, 200, 255))
+                                        .strong(),
+                                );
+                                ui.add_space(8.0);
+                                ui.hyperlink_to(
+                                    egui::RichText::new("Download Latest Release ↗")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(220, 240, 255))
+                                        .underline(),
+                                    update_url,
+                                );
+                            });
+                        });
+                    }
 
                     // Permission Guidance Alert Banner (if any)
                     if let Some(ref alert) = permission_alert {

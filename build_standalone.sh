@@ -38,8 +38,11 @@ echo "[2/4] Bundling Nexto Python backend into standalone executable..."
     --distpath "$EMBEDDED_DIR" \
     --workpath /tmp/build_prepubot \
     --add-data "$SCRIPT_DIR/RLMarlbot:RLMarlbot" \
+    --add-data "$SCRIPT_DIR/version.txt:." \
+    --collect-all rlgym_compat \
+    --collect-all rlbot \
+    --collect-all rlsdk_python \
     --exclude-module matplotlib \
-    --exclude-module scipy \
     --exclude-module pandas \
     --exclude-module sympy \
     --exclude-module PIL \
@@ -50,6 +53,7 @@ echo "[2/4] Bundling Nexto Python backend into standalone executable..."
     --exclude-module pytest \
     -y
 
+
 chmod +x "$EMBEDDED_DIR/nexto_backend"
 echo " Backend binary ready: $(ls -lh "$EMBEDDED_DIR/nexto_backend" | awk '{print $5}')"
 
@@ -59,6 +63,7 @@ cargo build --release --manifest-path "$SCRIPT_DIR/nexto_gui/Cargo.toml"
 
 # 4. Copy to dist
 echo "[4/4] Finalizing single binary in $DIST_DIR/prepubot..."
+rm -f "$DIST_DIR/prepubot"
 cp "$SCRIPT_DIR/nexto_gui/target/release/prepubot" "$DIST_DIR/prepubot"
 chmod +x "$DIST_DIR/prepubot"
 
