@@ -223,6 +223,36 @@ fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<
             .map_err(|e| format!("Failed to finalize backend dir: {}", e))?;
 
         if backend_exe.is_file() {
+            // Post-extraction diagnostics: verify libpython and check for missing deps
+            let internal_dir = backend_dir.join("nexto_backend").join("_internal");
+            if internal_dir.is_dir() {
+                let file_count = std::fs::read_dir(&internal_dir).map(|e| e.count()).unwrap_or(0);
+                eprintln!("[PrepuBot] Extraction complete: _internal/ contains {} entries", file_count);
+
+                if let Ok(entries) = std::fs::read_dir(&internal_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let name = entry.file_name();
+                        let n = name.to_string_lossy();
+                        if n.starts_with("libpython") && n.contains(".so") {
+                            let lib_path = entry.path();
+                            eprintln!("[PrepuBot] Found {}, checking dependencies...", n);
+                            // Run ldd to diagnose missing system libraries
+                            if let Ok(ldd_out) = Command::new("ldd")
+                                .arg(&lib_path)
+                                .output()
+                            {
+                                let stdout = String::from_utf8_lossy(&ldd_out.stdout);
+                                for line in stdout.lines() {
+                                    if line.contains("not found") {
+                                        eprintln!("[PrepuBot] MISSING DEP: {}", line.trim());
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             return Ok(backend_exe);
         }
         return Err(format!("Extracted backend binary not found at {:?}", backend_exe));
@@ -391,19 +421,58 @@ impl PrepuBotApp {
         let stdin_holder = self.child_stdin.clone();
 
         thread::spawn(move || {
-            let backend_target = match extract_backend_if_needed(Some(&state)) {
-                Ok(p) => p,
-                Err(e) => {
-                    let mut s = state.lock().unwrap();
-                    s.status_msg = format!("Setup error: {}", e);
-                    s.permission_alert = Some(e);
-                    return;
-                }
-            };
-
-            let is_python = backend_target.extension().map_or(false, |ext| ext == "py");
+            let mut rapid_crash_count: u32 = 0;
 
             loop {
+                // Re-resolve backend target each iteration so post-purge re-extraction works
+                let backend_target = match extract_backend_if_needed(Some(&state)) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let mut s = state.lock().unwrap();
+                        s.status_msg = format!("Setup error: {}", e);
+                        s.permission_alert = Some(e);
+                        return;
+                    }
+                };
+
+                let is_python = backend_target.extension().map_or(false, |ext| ext == "py");
+
+                // Pre-launch sanity check: verify _internal/libpython*.so exists for bundled backends
+                if !is_python {
+                    let internal_dir = backend_target.parent().unwrap_or(backend_target.as_ref()).join("_internal");
+                    if internal_dir.is_dir() {
+                        let has_libpython = std::fs::read_dir(&internal_dir)
+                            .map(|entries| entries.filter_map(|e| e.ok())
+                                .any(|e| {
+                                    let name = e.file_name();
+                                    let n = name.to_string_lossy();
+                                    n.starts_with("libpython") && n.contains(".so")
+                                }))
+                            .unwrap_or(false);
+                        if !has_libpython {
+                            eprintln!("[PrepuBot] WARNING: _internal/ directory exists but libpython*.so is missing!");
+                            eprintln!("[PrepuBot] Contents of _internal/ (first 20 entries):");
+                            if let Ok(entries) = std::fs::read_dir(&internal_dir) {
+                                for (i, entry) in entries.filter_map(|e| e.ok()).enumerate() {
+                                    if i >= 20 { break; }
+                                    eprintln!("[PrepuBot]   {}", entry.file_name().to_string_lossy());
+                                }
+                            }
+                            // Try purging and re-extracting once
+                            if rapid_crash_count == 0 {
+                                eprintln!("[PrepuBot] Attempting clean re-extraction due to missing libpython...");
+                                if let Ok(home) = std::env::var("HOME") {
+                                    let base_dir = PathBuf::from(home).join(".cache").join("prepubot");
+                                    let _ = std::fs::remove_dir_all(base_dir.join("backend"));
+                                }
+                                rapid_crash_count += 1;
+                                thread::sleep(Duration::from_secs(1));
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 {
                     let mut s = state.lock().unwrap();
                     if s.permission_alert.is_none() {
@@ -421,6 +490,18 @@ impl PrepuBotApp {
                 } else {
                     Command::new(&backend_target)
                 };
+
+                // Help the PyInstaller bootloader find bundled .so files (especially libpython)
+                if !is_python {
+                    let internal_dir = backend_target.parent().unwrap_or(backend_target.as_ref()).join("_internal");
+                    if internal_dir.is_dir() {
+                        let ld_path = match std::env::var("LD_LIBRARY_PATH") {
+                            Ok(existing) => format!("{}:{}", internal_dir.display(), existing),
+                            Err(_) => internal_dir.display().to_string(),
+                        };
+                        cmd.env("LD_LIBRARY_PATH", &ld_path);
+                    }
+                }
 
                 cmd.arg("--ipc")
                     .arg("--current-version")
@@ -563,15 +644,27 @@ impl PrepuBotApp {
                         }
 
                         // Auto-recovery: If backend crashed within 3 seconds of launching,
-                        // purge the cache so the next iteration extracts a clean backend payload
+                        // purge the cache so the next iteration re-extracts a clean payload
                         if spawn_instant.elapsed().as_secs() < 3 && exit_res.map_or(false, |st| !st.success()) {
-                            if !is_python {
-                                eprintln!("[PrepuBot] Backend crashed on launch. Purging backend cache for clean re-extraction...");
+                            rapid_crash_count += 1;
+                            if !is_python && rapid_crash_count <= 3 {
+                                eprintln!("[PrepuBot] Backend crashed on launch (attempt {}/3). Purging backend cache for clean re-extraction...", rapid_crash_count);
                                 if let Ok(home) = std::env::var("HOME") {
                                     let base_dir = PathBuf::from(home).join(".cache").join("prepubot");
                                     let _ = std::fs::remove_dir_all(base_dir.join("backend"));
                                 }
+                            } else if rapid_crash_count > 3 {
+                                eprintln!("[PrepuBot] Backend crashed {} times in a row. Stopping retry loop.", rapid_crash_count);
+                                eprintln!("[PrepuBot] This usually means your system is missing a library the backend needs.");
+                                eprintln!("[PrepuBot] Check ~/.cache/prepubot/backend.log for details.");
+                                let mut s = state.lock().unwrap();
+                                s.status_msg = "Backend keeps crashing — check backend.log".to_string();
+                                s.permission_alert = Some("Backend crashed repeatedly on launch. Check ~/.cache/prepubot/backend.log for details.".to_string());
+                                return;
                             }
+                        } else {
+                            // Backend ran normally for a while, reset crash counter
+                            rapid_crash_count = 0;
                         }
                     }
                     Err(e) => {
