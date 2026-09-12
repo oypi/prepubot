@@ -62,22 +62,54 @@ If you use the standalone executable, **you do NOT need Python, PyTorch, pip, gi
 On Linux (Ubuntu, Debian, Fedora, Arch, SteamOS), the bot requires permission to emulate an Xbox gamepad and inspect game memory:
 
 ```bash
-# 1. Allow gamepad emulation
+# 1. Allow gamepad emulation (required)
 sudo chmod 666 /dev/uinput
 
-# 2. Allow reading game memory via process_vm_readv / ptrace
+# 2. Allow reading game memory via process_vm_readv / ptrace (required)
 echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
 
-# 3. (Optional) Ensure user is in input group for global F6 hotkey
+# 3. Add your user to the input group for global F6 hotkey toggle (required for F6)
 sudo usermod -aG input $USER
 ```
 
-### 2. Run PrepuBot
+> [!IMPORTANT]
+> **F6 Hotkey Requirement**: The global **F6** key will **only work if your user belongs to the `input` group** (`/dev/input/event*` devices). After running `sudo usermod -aG input $USER`, you **must log out and log back in** (or reboot) for group membership changes to apply to your desktop session!
+
+### 2. In-Game Settings & Controls Configuration
+
+To achieve peak neural performance, configure your Rocket League settings as follows:
+
+#### Controller Bindings
+The emulated virtual Xbox 360 controller outputs standard XInput controls:
+- **Throttle / Forward**: Right Trigger (`RT`)
+- **Brake / Reverse**: Left Trigger (`LT`)
+- **Steer / Pitch / Yaw**: Left Analog Stick
+- **Jump**: `A` Button
+- **Boost**: `B` Button
+- **Powerslide & Air Roll**: `X` Button
+
+#### Sensitivity & Deadzones (CRITICAL)
+In Rocket League, open **Settings -> Controls**:
+- **Controller Deadzone**: Set to **minimum** (`0.05` or lowest stable value).
+- **Steering Sensitivity**: Set to **minimum** (`1.00`).
+- **Aerial Sensitivity**: Set to **minimum** (`1.00`).
+- **Dodge Deadzone**: Default (`0.50` – `0.70`).
+
+> [!TIP]
+> **Why minimum sensitivity and deadzones?**
+> The neural policy models (**Nexto**, **Seer**, **Element**) calculate exact, linear floating-point stick deflections in `[-1.0, 1.0]`. If you have high sensitivity multipliers or large deadzones set in Rocket League, the game distorts the bot's calculated trajectory, causing jittery steering, over-correction, or inaccurate aerial touches.
+
+### 3. Run PrepuBot
 ```bash
 chmod +x prepubot
 ./prepubot
 ```
-On first launch, PrepuBot extracts its internal engine into `~/.cache/prepubot/` and automatically connects to Rocket League.
+On launch, PrepuBot checks its internal engine payload. If you are upgrading from an older version, PrepuBot **automatically migrates and updates the cache** in `~/.cache/prepubot/` without requiring manual directory deletion.
+
+You can also force a complete fresh cache extraction at any time:
+```bash
+./prepubot --clean-cache
+```
 
 ---
 

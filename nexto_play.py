@@ -368,84 +368,92 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
 
         now = time.perf_counter()
 
-        # Check window focus every 250ms using universal multi-desktop detection
-        if now - last_focus_check >= 0.25:
-            last_focus_check = now
-            game_focused = check_game_window_focused()
+        try:
+            # Check window focus every 250ms using universal multi-desktop detection
+            if now - last_focus_check >= 0.25:
+                last_focus_check = now
+                game_focused = check_game_window_focused()
 
-        is_paused = driver.is_paused()
-        has_entities = driver.update_entities()
+            is_paused = driver.is_paused()
+            has_entities = driver.update_entities()
 
-        # Keep controller pointers synchronized with active game objects (respawns, goals)
-        if hasattr(controller, "update_pointers"):
-            controller.update_pointers(driver.pc_ptr, driver.car_ptr)
+            # Keep controller pointers synchronized with active game objects (respawns, goals)
+            if hasattr(controller, "update_pointers"):
+                controller.update_pointers(driver.pc_ptr, driver.car_ptr)
 
-        car = driver.read_car_state() if has_entities else None
-        ball = driver.read_ball_state() if has_entities else None
-        mates = [driver.read_car_state(car_ptr=p) for p in driver.mate_ptrs] if has_entities else []
-        opponents = [driver.read_car_state(car_ptr=p) for p in driver.opp_ptrs] if has_entities else []
+            car = driver.read_car_state() if has_entities else None
+            ball = driver.read_ball_state() if has_entities else None
+            mates = [driver.read_car_state(car_ptr=p) for p in driver.mate_ptrs] if has_entities else []
+            opponents = [driver.read_car_state(car_ptr=p) for p in driver.opp_ptrs] if has_entities else []
 
-        if not has_entities or car is None or ball is None:
-            controller.reset()
-            kickoff_mgr.reset()
-            is_in_menu = (driver.pc_ptr is None)
-            telemetry = {
-                "type": "telemetry",
-                "state": "IN_MENU" if is_in_menu else "MATCH",
-                "active": active,
-                "team": driver.team,
-                "bot": bot_manager.bot_name,
-                "input_mode": input_mode,
-                "focus_guard": focus_guard,
-                "fps": round(fps, 1),
-                "car": {"pos": [0.0, 0.0, 0.0], "spd": 0.0, "boost": 0.0, "on_ground": False, "has_flip": False},
-                "ball": {"pos": [0.0, 0.0, 0.0], "dist": 0.0, "spd": 0.0},
-                "teammate": None,
-                "enemy": None,
-                "action": "IN MENU" if is_in_menu else "GOAL / RESPAWN",
-            }
-            print(json.dumps(telemetry), flush=True)
-            time.sleep(0.1 if is_in_menu else 0.01)
-            continue
-
-        # Check if ball is kickoff ball to reset boost pads
-        ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
-        ball_spd = float(np.linalg.norm(ball["vel"]))
-        if ball_dist_center < 35.0 and ball_spd < 50.0:
-            driver.reset_boost_pads()
-
-        # Update bot team if team changed
-        if driver.team != bot_manager.team:
-            bot_manager.team = driver.team
-            bot_manager.bot.team = driver.team
-
-        # Execute decision & control
-        now = time.perf_counter()
-        if is_paused:
-            kickoff_mgr.reset()
-            controller.reset()
-            act_str = "PAUSED"
-        elif focus_guard and not game_focused:
-            kickoff_mgr.reset()
-            controller.reset()
-            act_str = "OUT OF FOCUS"
-        elif active:
-            try:
-                kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
-                if kick_act is not None:
-                    controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                    act_str = kick_str
-                else:
-                    ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
-                    controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                    act_str = action_to_act_str(ctrl)
-            except Exception:
+            if not has_entities or car is None or ball is None:
                 controller.reset()
-                act_str = "ACTIVE"
-        else:
-            kickoff_mgr.reset()
-            controller.reset()
-            act_str = "IDLE"
+                kickoff_mgr.reset()
+                is_in_menu = (driver.pc_ptr is None)
+                telemetry = {
+                    "type": "telemetry",
+                    "state": "IN_MENU" if is_in_menu else "MATCH",
+                    "active": active,
+                    "team": driver.team,
+                    "bot": bot_manager.bot_name,
+                    "input_mode": input_mode,
+                    "focus_guard": focus_guard,
+                    "fps": round(fps, 1),
+                    "car": {"pos": [0.0, 0.0, 0.0], "spd": 0.0, "boost": 0.0, "on_ground": False, "has_flip": False},
+                    "ball": {"pos": [0.0, 0.0, 0.0], "dist": 0.0, "spd": 0.0},
+                    "teammate": None,
+                    "enemy": None,
+                    "action": "IN MENU" if is_in_menu else "GOAL / RESPAWN",
+                }
+                print(json.dumps(telemetry), flush=True)
+                time.sleep(0.1 if is_in_menu else 0.01)
+                continue
+
+            # Check if ball is kickoff ball to reset boost pads
+            ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
+            ball_spd = float(np.linalg.norm(ball["vel"]))
+            if ball_dist_center < 35.0 and ball_spd < 50.0:
+                driver.reset_boost_pads()
+
+            # Update bot team if team changed
+            if driver.team != bot_manager.team:
+                bot_manager.team = driver.team
+                bot_manager.bot.team = driver.team
+
+            # Execute decision & control
+            now = time.perf_counter()
+            if is_paused:
+                kickoff_mgr.reset()
+                controller.reset()
+                act_str = "PAUSED"
+            elif focus_guard and not game_focused:
+                kickoff_mgr.reset()
+                controller.reset()
+                act_str = "OUT OF FOCUS"
+            elif active:
+                try:
+                    kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
+                    if kick_act is not None:
+                        controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                        act_str = kick_str
+                    else:
+                        ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                        controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                        act_str = action_to_act_str(ctrl)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc(file=sys.stderr)
+                    controller.reset()
+                    act_str = "ACTIVE"
+            else:
+                kickoff_mgr.reset()
+                controller.reset()
+                act_str = "IDLE"
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            time.sleep(0.01)
+            continue
 
         frames += 1
         now = time.perf_counter()

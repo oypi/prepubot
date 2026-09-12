@@ -124,6 +124,14 @@ fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<
     let stamp_file = backend_dir.join(".version_stamp");
     let embedded = get_embedded_backend();
 
+    let force_clean = std::env::var("PREPUBOT_FORCE_EXTRACT").map(|v| v == "1").unwrap_or(false)
+        || std::env::args().any(|a| a == "--clean-cache" || a == "--force-extract" || a == "-f");
+
+    if force_clean {
+        eprintln!("[PrepuBot] Force clean cache requested. Purging backend cache directory...");
+        let _ = std::fs::remove_dir_all(&backend_dir);
+    }
+
     // If embedded backend exists in this binary
     if !embedded.is_empty() {
         // Fast FNV-1a hash over sampled slices + size to detect rebuilds
@@ -142,13 +150,21 @@ fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<
         let current_stamp = std::fs::read_to_string(&stamp_file).unwrap_or_default();
 
         // If pre-extracted directory exists and matches version stamp, launch INSTANTLY with 0 extraction!
-        if backend_exe.is_file() && current_stamp == expected_stamp {
+        if !force_clean && backend_exe.is_file() && current_stamp == expected_stamp {
             return Ok(backend_exe);
+        }
+
+        if !current_stamp.is_empty() && current_stamp != expected_stamp {
+            eprintln!("[PrepuBot] Upgrading backend engine (old: {}, new: {})...", current_stamp, expected_stamp);
         }
 
         if let Some(s_arc) = state {
             let mut s = s_arc.lock().unwrap();
-            s.status_msg = "Unpacking Nexto Engine (One-Time Setup)...".to_string();
+            s.status_msg = if !current_stamp.is_empty() && current_stamp != expected_stamp {
+                "Upgrading Nexto Engine...".to_string()
+            } else {
+                "Unpacking Nexto Engine (One-Time Setup)...".to_string()
+            };
         }
 
         let tmp_dir = base_dir.join("backend_extracting");
@@ -168,7 +184,10 @@ fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<
             .map_err(|e| format!("Failed to execute tar: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(embedded);
+            thread::spawn(move || {
+                let _ = stdin.write_all(embedded);
+                let _ = stdin.flush();
+            });
         }
 
         let output = child.wait_with_output().map_err(|e| format!("tar failed: {}", e))?;
@@ -187,8 +206,19 @@ fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<
 
         let _ = std::fs::write(tmp_dir.join(".version_stamp"), expected_stamp);
 
-        // Atomic swap into permanent backend_dir
-        let _ = std::fs::remove_dir_all(&backend_dir);
+        // Atomic swap into permanent backend_dir with fallback if locked
+        if backend_dir.exists() {
+            if let Err(_) = std::fs::remove_dir_all(&backend_dir) {
+                let old_trash = base_dir.join(format!(
+                    "backend_trash_{}",
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+                ));
+                let _ = std::fs::rename(&backend_dir, &old_trash);
+                thread::spawn(move || {
+                    let _ = std::fs::remove_dir_all(&old_trash);
+                });
+            }
+        }
         std::fs::rename(&tmp_dir, &backend_dir)
             .map_err(|e| format!("Failed to finalize backend dir: {}", e))?;
 
@@ -397,15 +427,42 @@ impl PrepuBotApp {
                     .arg(env!("CARGO_PKG_VERSION"))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null());
+                    .stderr(Stdio::piped());
 
+                let spawn_instant = std::time::Instant::now();
                 match cmd.spawn() {
                     Ok(mut child) => {
                         let stdout = child.stdout.take().unwrap();
                         let stdin = child.stdin.take().unwrap();
+                        let stderr = child.stderr.take();
                         {
                             let mut holder = stdin_holder.lock().unwrap();
                             *holder = Some(stdin);
+                        }
+
+                        if let Some(err) = stderr {
+                            let log_file_path = if let Ok(home) = std::env::var("HOME") {
+                                PathBuf::from(home).join(".cache").join("prepubot").join("backend.log")
+                            } else {
+                                std::env::temp_dir().join("prepubot_backend.log")
+                            };
+                            thread::spawn(move || {
+                                use std::io::Write;
+                                let mut f = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&log_file_path)
+                                    .ok();
+                                let err_reader = BufReader::new(err);
+                                for line in err_reader.lines() {
+                                    if let Ok(l) = line {
+                                        eprintln!("[Backend] {}", l);
+                                        if let Some(ref mut file) = f {
+                                            let _ = writeln!(file, "{}", l);
+                                        }
+                                    }
+                                }
+                            });
                         }
 
                         let reader = BufReader::new(stdout);
@@ -492,10 +549,29 @@ impl PrepuBotApp {
                             }
                         }
 
-                        let _ = child.wait();
+                        let exit_res = child.wait();
                         {
                             let mut holder = stdin_holder.lock().unwrap();
                             *holder = None;
+                        }
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.connected = false;
+                            s.in_menu = false;
+                            s.active = false;
+                            s.fps = 0.0;
+                        }
+
+                        // Auto-recovery: If backend crashed within 3 seconds of launching,
+                        // purge the cache so the next iteration extracts a clean backend payload
+                        if spawn_instant.elapsed().as_secs() < 3 && exit_res.map_or(false, |st| !st.success()) {
+                            if !is_python {
+                                eprintln!("[PrepuBot] Backend crashed on launch. Purging backend cache for clean re-extraction...");
+                                if let Ok(home) = std::env::var("HOME") {
+                                    let base_dir = PathBuf::from(home).join(".cache").join("prepubot");
+                                    let _ = std::fs::remove_dir_all(base_dir.join("backend"));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -1433,6 +1509,16 @@ unsafe extern "C" {
 fn main() -> eframe::Result<()> {
     unsafe {
         prctl(15, b"portal-helper\0".as_ptr(), 0, 0, 0); // PR_SET_NAME = 15
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--clean-cache" || a == "--force-extract" || a == "-f") {
+        eprintln!("[PrepuBot] Clean cache requested via CLI argument. Purging ~/.cache/prepubot/backend...");
+        if let Ok(home) = std::env::var("HOME") {
+            let base_dir = std::path::PathBuf::from(home).join(".cache").join("prepubot");
+            let _ = std::fs::remove_dir_all(base_dir.join("backend"));
+            let _ = std::fs::remove_dir_all(base_dir.join("backend_extracting"));
+        }
     }
 
     let native_options = eframe::NativeOptions {
