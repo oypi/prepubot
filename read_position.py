@@ -55,14 +55,23 @@ def get_rocket_league_pid():
                 cmdline = f.read().decode(errors="ignore").replace("\0", " ")
 
             cmdline_lower = cmdline.lower()
+            comm_path = f"/proc/{pid}/comm"
+            comm = ""
+            if os.path.exists(comm_path):
+                try:
+                    with open(comm_path, "r", errors="ignore") as f:
+                        comm = f.read().strip().lower()
+                except Exception:
+                    pass
+
             # Strictly exclude EAC integrity bootstrap, launchers, and our own processes
-            if "rocketleague_eac.exe" in cmdline_lower or "easyanticheat" in cmdline_lower:
+            if "rocketleague_eac.exe" in cmdline_lower or "easyanticheat" in cmdline_lower or "easyanticheat" in comm:
                 continue
-            if "launcher.exe" in cmdline_lower:
+            if "launcher.exe" in cmdline_lower or "launcher" in comm:
                 continue
-            if "nexto" in cmdline_lower or "prepubot" in cmdline_lower or "python" in cmdline_lower:
+            if "nexto" in cmdline_lower or "prepubot" in cmdline_lower or "python" in cmdline_lower or "prepubot" in comm:
                 continue
-            if "rocketleague.exe" in cmdline_lower:
+            if "rocketleague.exe" in cmdline_lower or "rocketleague" in cmdline_lower or "rocketleague" in comm:
                 candidates.append(pid)
         except Exception:
             continue

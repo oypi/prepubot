@@ -1,5 +1,4 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,33 +24,6 @@ fn should_trigger_f6() -> bool {
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-core::arch::global_asm!(concat!(
-    r#"
-    .section .rodata.embedded_backend,"a",@progbits
-    .globl _embedded_backend_start
-    .globl _embedded_backend_end
-_embedded_backend_start:
-    .incbin ""#,
-    env!("CARGO_MANIFEST_DIR"),
-    r#"/embedded_backend/backend.tar.gz"
-_embedded_backend_end:
-"#
-));
-
-unsafe extern "C" {
-    static _embedded_backend_start: u8;
-    static _embedded_backend_end: u8;
-}
-
-fn get_embedded_backend() -> &'static [u8] {
-    unsafe {
-        let start = std::ptr::addr_of!(_embedded_backend_start);
-        let end = std::ptr::addr_of!(_embedded_backend_end);
-        let len = (end as usize).saturating_sub(start as usize);
-        std::slice::from_raw_parts(start, len)
-    }
-}
-
 fn parse_version(v: &str) -> Vec<u32> {
     v.trim()
         .trim_start_matches('v')
@@ -72,198 +44,84 @@ fn is_newer(remote: &str, current: &str) -> bool {
     r > c
 }
 
-fn find_dev_script(current_exe: &std::path::Path) -> Option<PathBuf> {
+pub struct BackendRunner {
+    pub python_bin: PathBuf,
+    pub script_path: PathBuf,
+}
+
+fn find_python_interpreter(project_dir: &std::path::Path) -> PathBuf {
+    // 1. Check local virtualenv (.venv or venv) in project directory
+    let venv_candidates = [
+        project_dir.join(".venv").join("bin").join("python3"),
+        project_dir.join(".venv").join("bin").join("python"),
+        project_dir.join("venv").join("bin").join("python3"),
+        project_dir.join("venv").join("bin").join("python"),
+    ];
+    for c in &venv_candidates {
+        if c.is_file() {
+            return c.clone();
+        }
+    }
+
+    // 2. Check ~/.cache/prepubot/venv/bin/python3
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_venv = PathBuf::from(home).join(".cache").join("prepubot").join("venv").join("bin").join("python3");
+        if cache_venv.is_file() {
+            return cache_venv;
+        }
+    }
+
+    // 3. Fallback to system python3
+    PathBuf::from("python3")
+}
+
+fn resolve_backend() -> Result<BackendRunner, String> {
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let mut search_dirs = Vec::new();
+
     if let Ok(path) = std::env::var("NEXTO_SCRIPT_PATH") {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
+        let pb = PathBuf::from(path);
+        if pb.is_file() {
+            let py = find_python_interpreter(pb.parent().unwrap_or(&pb));
+            return Ok(BackendRunner { python_bin: py, script_path: pb });
         }
     }
+
     if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join("nexto_play.py");
-        if p.exists() {
-            return Some(p);
+        search_dirs.push(cwd);
+    }
+    if let Some(parent) = current_exe.parent() {
+        search_dirs.push(parent.to_path_buf());
+        let mut cur = parent;
+        for _ in 0..4 {
+            if let Some(p) = cur.parent() {
+                search_dirs.push(p.to_path_buf());
+                cur = p;
+            }
         }
     }
-    // Check executable directory and up to 4 parent levels (e.g. target/release/ -> ../../../nexto_play.py)
-    let mut cur = current_exe.parent();
-    for _ in 0..4 {
-        if let Some(dir) = cur {
-            let p = dir.join("nexto_play.py");
-            if p.exists() {
-                return Some(p);
-            }
-            cur = dir.parent();
-        } else {
+
+    let mut script_opt = None;
+    for dir in &search_dirs {
+        let p = dir.join("nexto_play.py");
+        if p.is_file() {
+            script_opt = Some(p);
             break;
         }
     }
-    None
-}
 
-fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<PathBuf, String> {
-    // 1. Developer mode: If running via `cargo run` (binary inside target/) or PREPUBOT_DEV is set,
-    // prefer running nexto_play.py directly with system python3 for instant code changes.
-    let current_exe = std::env::current_exe().unwrap_or_default();
-    let is_cargo_dev = current_exe.to_string_lossy().contains("/target/") || std::env::var("PREPUBOT_DEV").is_ok();
-
-    if is_cargo_dev {
-        if let Some(p) = find_dev_script(&current_exe) {
-            return Ok(p);
-        }
-    }
-
-    let base_dir = if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".cache").join("prepubot")
-    } else {
-        std::env::temp_dir().join("prepubot")
+    let script = match script_opt {
+        Some(s) => s,
+        None => return Err("Could not find nexto_play.py. Run ./run.sh from the prepubot directory.".to_string()),
     };
 
-    let backend_dir = base_dir.join("backend");
-    let backend_exe = backend_dir.join("nexto_backend").join("nexto_backend");
-    let stamp_file = backend_dir.join(".version_stamp");
-    let embedded = get_embedded_backend();
+    let script_dir = script.parent().unwrap_or(std::path::Path::new("."));
+    let python_bin = find_python_interpreter(script_dir);
 
-    let force_clean = std::env::var("PREPUBOT_FORCE_EXTRACT").map(|v| v == "1").unwrap_or(false)
-        || std::env::args().any(|a| a == "--clean-cache" || a == "--force-extract" || a == "-f");
-
-    if force_clean {
-        eprintln!("[PrepuBot] Force clean cache requested. Purging backend cache directory...");
-        let _ = std::fs::remove_dir_all(&backend_dir);
-    }
-
-    // If embedded backend exists in this binary
-    if !embedded.is_empty() {
-        // Fast FNV-1a hash over sampled slices + size to detect rebuilds
-        let mut hasher: u64 = 0xcbf29ce484222325;
-        hasher ^= embedded.len() as u64;
-        hasher = hasher.wrapping_mul(0x100000001b3);
-        let sample_step = (embedded.len() / 512).max(1);
-        for chunk in embedded.chunks(sample_step) {
-            if let Some(&b) = chunk.first() {
-                hasher ^= b as u64;
-                hasher = hasher.wrapping_mul(0x100000001b3);
-            }
-        }
-
-        let expected_stamp = format!("{}_{:016x}_{}", env!("CARGO_PKG_VERSION"), hasher, embedded.len());
-        let current_stamp = std::fs::read_to_string(&stamp_file).unwrap_or_default();
-
-        // If pre-extracted directory exists and matches version stamp, launch INSTANTLY with 0 extraction!
-        if !force_clean && backend_exe.is_file() && current_stamp == expected_stamp {
-            return Ok(backend_exe);
-        }
-
-        if !current_stamp.is_empty() && current_stamp != expected_stamp {
-            eprintln!("[PrepuBot] Upgrading backend engine (old: {}, new: {})...", current_stamp, expected_stamp);
-        }
-
-        if let Some(s_arc) = state {
-            let mut s = s_arc.lock().unwrap();
-            s.status_msg = if !current_stamp.is_empty() && current_stamp != expected_stamp {
-                "Upgrading Nexto Engine...".to_string()
-            } else {
-                "Unpacking Nexto Engine (One-Time Setup)...".to_string()
-            };
-        }
-
-        let tmp_dir = base_dir.join("backend_extracting");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir)
-            .map_err(|e| format!("Failed to create extraction dir {:?}: {}", tmp_dir, e))?;
-
-        let mut child = Command::new("tar")
-            .arg("-xzf")
-            .arg("-")
-            .arg("-C")
-            .arg(&tmp_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to execute tar: {}", e))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            thread::spawn(move || {
-                let _ = stdin.write_all(embedded);
-                let _ = stdin.flush();
-            });
-        }
-
-        let output = child.wait_with_output().map_err(|e| format!("tar failed: {}", e))?;
-        if !output.status.success() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tar extraction failed: {}", err));
-        }
-
-        let tmp_exe = tmp_dir.join("nexto_backend").join("nexto_backend");
-        if let Ok(m) = std::fs::metadata(&tmp_exe) {
-            let mut p = m.permissions();
-            p.set_mode(0o755);
-            let _ = std::fs::set_permissions(&tmp_exe, p);
-        }
-
-        let _ = std::fs::write(tmp_dir.join(".version_stamp"), expected_stamp);
-
-        // Atomic swap into permanent backend_dir with fallback if locked
-        if backend_dir.exists() {
-            if let Err(_) = std::fs::remove_dir_all(&backend_dir) {
-                let old_trash = base_dir.join(format!(
-                    "backend_trash_{}",
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
-                ));
-                let _ = std::fs::rename(&backend_dir, &old_trash);
-                thread::spawn(move || {
-                    let _ = std::fs::remove_dir_all(&old_trash);
-                });
-            }
-        }
-        std::fs::rename(&tmp_dir, &backend_dir)
-            .map_err(|e| format!("Failed to finalize backend dir: {}", e))?;
-
-        if backend_exe.is_file() {
-            // Post-extraction diagnostics: verify libpython and check for missing deps
-            let internal_dir = backend_dir.join("nexto_backend").join("_internal");
-            if internal_dir.is_dir() {
-                let file_count = std::fs::read_dir(&internal_dir).map(|e| e.count()).unwrap_or(0);
-                eprintln!("[PrepuBot] Extraction complete: _internal/ contains {} entries", file_count);
-
-                if let Ok(entries) = std::fs::read_dir(&internal_dir) {
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        let name = entry.file_name();
-                        let n = name.to_string_lossy();
-                        if n.starts_with("libpython") && n.contains(".so") {
-                            let lib_path = entry.path();
-                            eprintln!("[PrepuBot] Found {}, checking dependencies...", n);
-                            // Run ldd to diagnose missing system libraries
-                            if let Ok(ldd_out) = Command::new("ldd")
-                                .arg(&lib_path)
-                                .output()
-                            {
-                                let stdout = String::from_utf8_lossy(&ldd_out.stdout);
-                                for line in stdout.lines() {
-                                    if line.contains("not found") {
-                                        eprintln!("[PrepuBot] MISSING DEP: {}", line.trim());
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            return Ok(backend_exe);
-        }
-        return Err(format!("Extracted backend binary not found at {:?}", backend_exe));
-    }
-
-    // Developer fallback: check nexto_play.py dynamically
-    if let Some(p) = find_dev_script(&current_exe) {
-        return Ok(p);
-    }
-
-    Err("Could not find nexto_backend executable or nexto_play.py".to_string())
+    Ok(BackendRunner {
+        python_bin,
+        script_path: script,
+    })
 }
 
 
@@ -426,9 +284,8 @@ impl PrepuBotApp {
             let mut rapid_crash_count: u32 = 0;
 
             loop {
-                // Re-resolve backend target each iteration so post-purge re-extraction works
-                let backend_target = match extract_backend_if_needed(Some(&state)) {
-                    Ok(p) => p,
+                let runner = match resolve_backend() {
+                    Ok(r) => r,
                     Err(e) => {
                         let mut s = state.lock().unwrap();
                         s.status_msg = format!("Setup error: {}", e);
@@ -436,26 +293,6 @@ impl PrepuBotApp {
                         return;
                     }
                 };
-
-                let is_python = backend_target.extension().map_or(false, |ext| ext == "py");
-
-                // Pre-launch sanity check: log warning if _internal/libpython*.so is missing
-                if !is_python {
-                    let internal_dir = backend_target.parent().unwrap_or(backend_target.as_ref()).join("_internal");
-                    if internal_dir.is_dir() {
-                        let has_libpython = std::fs::read_dir(&internal_dir)
-                            .map(|entries| entries.filter_map(|e| e.ok())
-                                .any(|e| {
-                                    let name = e.file_name();
-                                    let n = name.to_string_lossy();
-                                    n.starts_with("libpython") && n.contains(".so")
-                                }))
-                            .unwrap_or(false);
-                        if !has_libpython {
-                            eprintln!("[PrepuBot] WARNING: _internal/ directory exists but libpython*.so is missing!");
-                        }
-                    }
-                }
 
                 {
                     let mut s = state.lock().unwrap();
@@ -467,26 +304,8 @@ impl PrepuBotApp {
                     s.active = false;
                 }
 
-                // If precompiled binary repeatedly crashes (e.g. glibc mismatch), check for src_fallback
-                let src_fallback = backend_target.parent().unwrap_or(backend_target.as_ref()).join("src_fallback").join("nexto_play.py");
-                let use_python_fallback = rapid_crash_count >= 2 && src_fallback.is_file();
-
-                let (target_exe, is_python_cmd) = if use_python_fallback {
-                    eprintln!("[PrepuBot] Standalone binary incompatible on this system. Falling back to system python3 launcher...");
-                    (src_fallback, true)
-                } else if is_python {
-                    (backend_target.clone(), true)
-                } else {
-                    (backend_target.clone(), false)
-                };
-
-                let mut cmd = if is_python_cmd {
-                    let mut c = Command::new("python3");
-                    c.arg(&target_exe);
-                    c
-                } else {
-                    Command::new(&target_exe)
-                };
+                let mut cmd = Command::new(&runner.python_bin);
+                cmd.arg(&runner.script_path);
 
                 // Prevent PyTorch/OpenMP SIGABRT duplicate library crashes and thread contention
                 cmd.env("KMP_DUPLICATE_LIB_OK", "TRUE")

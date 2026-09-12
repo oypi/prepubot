@@ -19,6 +19,7 @@ NectoFamily/
 
 # Build & distribution binaries
 dist/
+prepubot
 nexto_gui/embedded_backend/
 *.spec
 
@@ -33,6 +34,7 @@ nexto_gui/embedded_backend/
 match_debug.jsonl*
 *.jsonl
 *.log
+scratch/
 
 
 

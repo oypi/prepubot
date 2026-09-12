@@ -609,10 +609,13 @@ def main():
     pid = get_rocket_league_pid()
     if not pid:
         if args.ipc:
-            print(json.dumps({"type": "error", "message": "Rocket League process not running"}), flush=True)
+            print(json.dumps({"type": "status", "state": "IN_MENU", "active": False, "message": "Waiting for Rocket League..."}), flush=True)
+            while not pid:
+                time.sleep(1.0)
+                pid = get_rocket_league_pid()
         else:
             print("Error: Rocket League process (RocketLeague.exe) not running!")
-        sys.exit(1)
+            sys.exit(1)
 
     try:
         scanner = RLMemoryReader(pid)
