@@ -11,6 +11,13 @@ from torch.distributions import Categorical
 
 class Agent:
     def __init__(self):
+        try:
+            torch._C._jit_set_profiling_executor(False)
+            torch._C._jit_set_profiling_mode(False)
+            torch._C._set_graph_executor_optimize(False)
+        except Exception:
+            pass
+
         cur_dir = os.path.dirname(os.path.realpath(__file__))
         with open(os.path.join(cur_dir, "nexto-model.pt"), 'rb') as f:
             self.actor = torch.jit.load(f)

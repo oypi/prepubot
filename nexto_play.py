@@ -17,6 +17,14 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
 
+try:
+    import torch
+    torch._C._jit_set_profiling_executor(False)
+    torch._C._jit_set_profiling_mode(False)
+    torch._C._set_graph_executor_optimize(False)
+except Exception:
+    pass
+
 import time
 import signal
 import math
@@ -814,6 +822,13 @@ def main():
 if __name__ == "__main__":
     import faulthandler
     faulthandler.enable(file=sys.stderr)
+    try:
+        log_dir = os.path.expanduser("~/.cache/prepubot")
+        os.makedirs(log_dir, exist_ok=True)
+        fh_file = open(os.path.join(log_dir, "faulthandler.log"), "a", buffering=1)
+        faulthandler.enable(file=fh_file, all_threads=True)
+    except Exception:
+        pass
 
     try:
         main()

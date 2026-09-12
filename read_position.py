@@ -131,7 +131,7 @@ class StealthMemIO:
             buf = ctypes.create_string_buffer(size)
             self._local_iov.iov_base = ctypes.cast(buf, ctypes.c_void_p)
             self._local_iov.iov_len = size
-            self._remote_iov.iov_base = address
+            self._remote_iov.iov_base = ctypes.c_void_p(address)
             self._remote_iov.iov_len = size
             nread = self._process_vm_readv(self.pid, self._local_ref, 1, self._remote_ref, 1, 0)
             if nread == size:
