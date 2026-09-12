@@ -113,50 +113,90 @@ def start_update_checker(ipc_mode=False, current_version=None):
     t.start()
 
 
-def check_game_window_focused():
-    """Universal window focus check supporting Niri, Hyprland, Sway, KDE, GNOME, X11, and fallbacks."""
-    # 1. Niri (Wayland)
+def get_process_family(pid):
+    """Returns the set of related PIDs (target, parent, and current process) for dynamic focus matching."""
+    family = {pid, os.getpid()}
     try:
-        out = subprocess.check_output(["niri", "msg", "focused-window"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
-        lower = out.lower()
-        if any(k in lower for k in ["rocket league", "252950", "rocketleague", "prepubot"]):
-            return True
-        return False
+        with open(f"/proc/{pid}/status", "r") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    ppid = int(line.split()[1])
+                    if ppid > 1:
+                        family.add(ppid)
+                    break
     except Exception:
         pass
+    return family
 
-    # 2. Hyprland (Wayland)
+
+def check_game_window_focused(target_pid=None):
+    """
+    Dynamically checks whether the active focused window belongs to the target game process,
+    its process tree, or prepubot itself, using PID inspection across Wayland and X11 compositors.
+    Zero hardcoded window titles or class names.
+    """
+    if not target_pid:
+        return True
+
+    target_pids = get_process_family(target_pid)
+
+    # 1. Hyprland (Wayland)
     try:
         out = subprocess.check_output(["hyprctl", "activewindow", "-j"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
-        lower = out.lower()
-        if any(k in lower for k in ["rocket league", "252950", "rocketleague", "prepubot"]):
+        data = json.loads(out)
+        win_pid = data.get("pid")
+        if win_pid and (win_pid in target_pids):
             return True
+        if win_pid:
+            try:
+                with open(f"/proc/{win_pid}/cmdline", "r") as f:
+                    if "rocketleague" in f.read().lower():
+                        return True
+            except Exception:
+                pass
         return False
     except Exception:
         pass
 
-    # 3. Sway / i3-wayland
+    # 2. Sway / i3 (Wayland)
     try:
         out = subprocess.check_output(["swaymsg", "-t", "get_tree"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
-        if '"focused": true' in out and any(k in out.lower() for k in ["rocket league", "252950", "rocketleague", "prepubot"]):
+        data = json.loads(out)
+        def _find_focused(node):
+            if node.get("focused"):
+                return node.get("pid")
+            for child in node.get("nodes", []) + node.get("floating_nodes", []):
+                p = _find_focused(child)
+                if p is not None:
+                    return p
+            return None
+        focused_pid = _find_focused(data)
+        if focused_pid and (focused_pid in target_pids):
             return True
     except Exception:
         pass
 
-    # 4. Standard X11 / Xwayland via xprop (XFCE, KDE, GNOME X11, Cinnamon, MATE, i3, etc.)
+    # 3. Standard X11 / Xwayland via xprop
     try:
         root_out = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
         win_id = root_out.strip().split()[-1]
         if win_id and win_id != "0x0":
-            win_out = subprocess.check_output(["xprop", "-id", win_id, "WM_NAME", "WM_CLASS"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
-            lower = win_out.lower()
-            if any(k in lower for k in ["rocket league", "252950", "rocketleague", "prepubot"]):
-                return True
-            return False
+            pid_out = subprocess.check_output(["xprop", "-id", win_id, "_NET_WM_PID"], text=True, timeout=0.15, stderr=subprocess.DEVNULL)
+            if "_NET_WM_PID" in pid_out:
+                win_pid = int(pid_out.strip().split()[-1])
+                if win_pid in target_pids:
+                    return True
+                try:
+                    with open(f"/proc/{win_pid}/cmdline", "r") as f:
+                        if "rocketleague" in f.read().lower():
+                            return True
+                except Exception:
+                    pass
+                return False
     except Exception:
         pass
 
-    # 5. Safe fallback
+    # 4. Safe fallback: if compositor check fails or unsupported, do not falsely unhook
     return True
 
 
@@ -310,7 +350,6 @@ def action_to_act_str(ctrl):
 
 def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initial_active=False):
     active = initial_active
-    last_toggle_time = 0.0
     focus_guard = False
     input_mode = initial_mode
     fps_timer = time.perf_counter()
@@ -321,63 +360,66 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
     game_focused = True
     car = None
     ball = None
-    act_str = "IDLE"
+    act_str = "STANDBY"
     kickoff_mgr = KickoffController()
 
     print(json.dumps({"type": "ready"}), flush=True)
 
     while True:
-        loop_start = time.perf_counter()
+        try:
+            loop_start = time.perf_counter()
 
-        # Check for stdin commands without blocking
-        while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-            line = sys.stdin.readline()
-            if not line:
-                return
-            try:
-                msg = json.loads(line.strip())
-                cmd = msg.get("cmd")
-                if cmd == "start":
-                    active = True
-                elif cmd == "stop":
-                    active = False
-                    act_str = "IDLE"
-                    controller.reset()
-                elif cmd == "toggle":
-                    now_t = time.perf_counter()
-                    if now_t - last_toggle_time >= 0.30:
-                        last_toggle_time = now_t
-                        active = not active
-                        if not active:
-                            act_str = "IDLE"
-                            controller.reset()
-                elif cmd == "set_beta":
-                    beta = max(0.0, min(1.0, float(msg.get("beta", 1.0))))
-                    if hasattr(bot_manager.bot, "beta"):
-                        bot_manager.bot.beta = beta
-                elif cmd == "set_bot":
-                    new_bot = msg.get("bot", "nexto")
-                    bot_manager.set_bot(new_bot)
-                elif cmd == "set_focus_guard":
-                    focus_guard = bool(msg.get("enabled", False))
-                elif cmd == "quit":
+            # 1. Process stdin commands non-blocking
+            while sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if line == "":
+                    # Parent GUI closed stdin -> Clean exit
                     controller.reset()
                     return
-            except Exception:
-                pass
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    msg = json.loads(line_str)
+                    cmd = msg.get("cmd")
+                    if cmd == "start":
+                        active = True
+                    elif cmd == "stop":
+                        active = False
+                        controller.reset()
+                    elif cmd == "toggle":
+                        active = not active
+                        if not active:
+                            controller.reset()
+                    elif cmd == "set_beta":
+                        beta = max(0.0, min(1.0, float(msg.get("beta", 1.0))))
+                        if hasattr(bot_manager.bot, "beta"):
+                            bot_manager.bot.beta = beta
+                    elif cmd == "set_bot":
+                        new_bot = msg.get("bot", "nexto")
+                        bot_manager.set_bot(new_bot)
+                    elif cmd == "set_focus_guard":
+                        focus_guard = bool(msg.get("enabled", False))
+                    elif cmd == "quit":
+                        controller.reset()
+                        return
+                except Exception as e:
+                    print(f"[PrepuBot IPC] Command parse warning: {e}", file=sys.stderr)
 
-        now = time.perf_counter()
+            now = time.perf_counter()
 
-        try:
-            # Check window focus every 250ms using universal multi-desktop detection
-            if now - last_focus_check >= 0.25:
-                last_focus_check = now
-                game_focused = check_game_window_focused()
+            # 2. Window focus check (ONLY if Focus Guard is actively enabled)
+            if focus_guard:
+                if now - last_focus_check >= 0.25:
+                    last_focus_check = now
+                    game_focused = check_game_window_focused(driver.pid)
+            else:
+                game_focused = True
 
+            # 3. Read game memory state
             is_paused = driver.is_paused()
             has_entities = driver.update_entities()
 
-            # Keep controller pointers synchronized with active game objects (respawns, goals)
             if hasattr(controller, "update_pointers"):
                 controller.update_pointers(driver.pc_ptr, driver.car_ptr)
 
@@ -406,120 +448,133 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
                     "action": "IN MENU" if is_in_menu else "GOAL / RESPAWN",
                 }
                 print(json.dumps(telemetry), flush=True)
-                time.sleep(0.1 if is_in_menu else 0.01)
+                time.sleep(0.05 if is_in_menu else 0.01)
                 continue
 
-            # Check if ball is kickoff ball to reset boost pads
+            # Ball kickoff reset
             ball_dist_center = float(np.linalg.norm(ball["pos"][:2]))
             ball_spd = float(np.linalg.norm(ball["vel"]))
             if ball_dist_center < 35.0 and ball_spd < 50.0:
                 driver.reset_boost_pads()
 
-            # Update bot team if team changed
             if driver.team != bot_manager.team:
                 bot_manager.team = driver.team
                 bot_manager.bot.team = driver.team
 
-            # Execute decision & control
-            now = time.perf_counter()
+            # 4. CONTINUOUS PIPELINE EXECUTION (Warm Nexto Model on every tick)
+            # The AI model evaluates on EVERY frame, keeping internal observation states,
+            # boost pad timers, and transformer attention warm and synchronized.
+            chosen_action = None
+            engine_act_str = "STANDBY"
+            try:
+                kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
+                if kick_act is not None:
+                    chosen_action = kick_act
+                    engine_act_str = kick_str
+                else:
+                    ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                    chosen_action = ctrl
+                    engine_act_str = action_to_act_str(ctrl)
+            except Exception as e:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                chosen_action = None
+                engine_act_str = "CALCULATING"
+
+            # 5. GATED CONTROLLER APPLICATION
+            # The virtual Xbox controller is ALWAYS connected to the system.
+            # When unengaged, it stays neutral so the user has 100% manual control.
+            # The instant the user engages, Nexto's warm action stream immediately drives the car!
             if is_paused:
-                kickoff_mgr.reset()
                 controller.reset()
+                kickoff_mgr.reset()
                 act_str = "PAUSED"
             elif focus_guard and not game_focused:
-                kickoff_mgr.reset()
                 controller.reset()
+                kickoff_mgr.reset()
                 act_str = "OUT OF FOCUS"
-            elif active:
-                try:
-                    kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
-                    if kick_act is not None:
-                        controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                        act_str = kick_str
-                    else:
-                        ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
-                        controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                        act_str = action_to_act_str(ctrl)
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc(file=sys.stderr)
-                    controller.reset()
-                    act_str = "ACTIVE"
+            elif active and chosen_action is not None:
+                controller.apply_action(
+                    chosen_action,
+                    on_ground=bool(car.get("on_ground", 1.0) > 0.5),
+                    car_z=float(car["pos"][2])
+                )
+                act_str = engine_act_str
             else:
-                kickoff_mgr.reset()
                 controller.reset()
-                act_str = "IDLE"
+                act_str = "MANUAL CONTROL" if not active else "STANDBY"
+
+            # 6. Framerate & Telemetry Calculation
+            frames += 1
+            now_fps = time.perf_counter()
+            if now_fps - fps_timer >= 1.0:
+                fps = frames / (now_fps - fps_timer)
+                frames = 0
+                fps_timer = now_fps
+
+            dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
+            speed = float(np.linalg.norm(car["vel"]))
+
+            mate_telemetry = None
+            if mates and len(mates) > 0 and mates[0] is not None:
+                mate = mates[0]
+                mate_telemetry = {
+                    "pos": [round(float(v), 1) for v in mate.get("pos", [0, 0, 0])],
+                    "spd": round(float(np.linalg.norm(mate.get("vel", [0, 0, 0]))), 1),
+                    "boost": round(float(mate.get("boost", 0.0)) * 100.0, 1),
+                    "dist": round(float(np.linalg.norm(car["pos"] - mate.get("pos", [0, 0, 0]))), 1),
+                    "ball_dist": round(float(np.linalg.norm(ball["pos"] - mate.get("pos", [0, 0, 0]))), 1),
+                }
+
+            opp_telemetry = None
+            if opponents and len(opponents) > 0 and opponents[0] is not None:
+                opp = opponents[0]
+                opp_telemetry = {
+                    "pos": [round(float(v), 1) for v in opp.get("pos", [0, 0, 0])],
+                    "spd": round(float(np.linalg.norm(opp.get("vel", [0, 0, 0]))), 1),
+                    "boost": round(float(opp.get("boost", 0.0)) * 100.0, 1),
+                    "dist": round(float(np.linalg.norm(car["pos"] - opp.get("pos", [0, 0, 0]))), 1),
+                    "ball_dist": round(float(np.linalg.norm(ball["pos"] - opp.get("pos", [0, 0, 0]))), 1),
+                }
+
+            telemetry = {
+                "type": "telemetry",
+                "active": active,
+                "team": driver.team,
+                "bot": bot_manager.bot_name,
+                "input_mode": input_mode,
+                "focus_guard": focus_guard,
+                "fps": round(fps, 1),
+                "car": {
+                    "pos": [round(float(v), 1) for v in car["pos"]],
+                    "spd": round(speed, 1),
+                    "boost": round(float(car.get("boost", 0.0)) * 100.0, 1),
+                    "on_ground": bool(car.get("on_ground", 1.0) > 0.5),
+                    "has_flip": bool(car.get("has_flip", 1.0) > 0.5),
+                },
+                "ball": {
+                    "pos": [round(float(v), 1) for v in ball["pos"]],
+                    "dist": round(dist_to_ball, 1),
+                    "spd": round(ball_spd, 1),
+                },
+                "teammate": mate_telemetry,
+                "enemy": opp_telemetry,
+                "action": act_str,
+            }
+            print(json.dumps(telemetry), flush=True)
+
+            # Precise 120.0 Hz loop timing (8.333 ms per frame)
+            target_tick = loop_start + (1.0 / 120.0)
+            remaining = target_tick - time.perf_counter()
+            if remaining > 0.002:
+                time.sleep(remaining - 0.0015)
+            while time.perf_counter() < target_tick:
+                pass
+
         except Exception as e:
             import traceback
             traceback.print_exc(file=sys.stderr)
-            time.sleep(0.01)
-            continue
-
-        frames += 1
-        now = time.perf_counter()
-        if now - fps_timer >= 1.0:
-            fps = frames / (now - fps_timer)
-            frames = 0
-            fps_timer = now
-
-        dist_to_ball = float(np.linalg.norm(car["pos"] - ball["pos"]))
-        speed = float(np.linalg.norm(car["vel"]))
-
-        mate_telemetry = None
-        if mates and len(mates) > 0 and mates[0] is not None:
-            mate = mates[0]
-            mate_telemetry = {
-                "pos": [round(float(v), 1) for v in mate["pos"]],
-                "spd": round(float(np.linalg.norm(mate["vel"])), 1),
-                "boost": round(float(mate["boost"]) * 100.0, 1),
-                "dist": round(float(np.linalg.norm(car["pos"] - mate["pos"])), 1),
-                "ball_dist": round(float(np.linalg.norm(ball["pos"] - mate["pos"])), 1),
-            }
-
-        opp_telemetry = None
-        if opponents and len(opponents) > 0 and opponents[0] is not None:
-            opp = opponents[0]
-            opp_telemetry = {
-                "pos": [round(float(v), 1) for v in opp["pos"]],
-                "spd": round(float(np.linalg.norm(opp["vel"])), 1),
-                "boost": round(float(opp["boost"]) * 100.0, 1),
-                "dist": round(float(np.linalg.norm(car["pos"] - opp["pos"])), 1),
-                "ball_dist": round(float(np.linalg.norm(ball["pos"] - opp["pos"])), 1),
-            }
-
-        telemetry = {
-            "type": "telemetry",
-            "active": active,
-            "team": driver.team,
-            "bot": bot_manager.bot_name,
-            "input_mode": input_mode,
-            "focus_guard": focus_guard,
-            "fps": round(fps, 1),
-            "car": {
-                "pos": [round(float(v), 1) for v in car["pos"]],
-                "spd": round(speed, 1),
-                "boost": round(float(car["boost"]) * 100.0, 1),
-                "on_ground": bool(car["on_ground"] > 0.5),
-                "has_flip": bool(car["has_flip"] > 0.5),
-            },
-            "ball": {
-                "pos": [round(float(v), 1) for v in ball["pos"]],
-                "dist": round(dist_to_ball, 1),
-                "spd": round(ball_spd, 1),
-            },
-            "teammate": mate_telemetry,
-            "enemy": opp_telemetry,
-            "action": act_str,
-        }
-        print(json.dumps(telemetry), flush=True)
-
-        # Precise 120.0 Hz loop timing (8.333 ms per frame)
-        target_tick = loop_start + (1.0 / 120.0)
-        remaining = target_tick - time.perf_counter()
-        if remaining > 0.002:
-            time.sleep(remaining - 0.0015)
-        while time.perf_counter() < target_tick:
-            pass
+            time.sleep(0.008)
 
 
 def main():
@@ -585,10 +640,7 @@ def main():
                         elif cmd == "stop":
                             is_active = False
                         elif cmd == "toggle":
-                            now_t = time.perf_counter()
-                            if now_t - last_menu_toggle >= 0.30:
-                                last_menu_toggle = now_t
-                                is_active = not is_active
+                            is_active = not is_active
                         elif cmd == "quit":
                             return
                     except Exception:

@@ -140,9 +140,9 @@ class NextoDriver:
                     self.missing_pc_ticks = 0
                 else:
                     self.missing_pc_ticks += 1
-                    # PlayerController is only invalidated after persistent absence (>25 consecutive ticks ~= 1.5s)
-                    # Transient respawns, demolitions, and goal resets only drop car for 1-2 ticks and must NOT trigger "In Menu"
-                    if self.missing_pc_ticks > 25:
+                    # PlayerController is only invalidated after persistent absence (>180 consecutive ticks ~= 1.5s at 120Hz)
+                    # Transient respawns, demolitions, and goal resets only drop car for a few frames and must NOT trigger "In Menu"
+                    if self.missing_pc_ticks > 180:
                         self.pc_ptr = None
                         self.car_ptr = None
                         self.ball_ptr = None
@@ -173,7 +173,7 @@ class NextoDriver:
             return True
         except Exception:
             self.missing_pc_ticks += 1
-            if self.missing_pc_ticks > 25:
+            if self.missing_pc_ticks > 180:
                 self.pc_ptr = None
                 self.reacquire_player_controller()
             return False

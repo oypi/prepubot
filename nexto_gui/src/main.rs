@@ -1033,7 +1033,11 @@ impl eframe::App for PrepuBotApp {
                     .min_size(egui::vec2(ui.available_width(), 40.0));
 
                     if ui.add_enabled(connected, toggle_btn).clicked() {
-                        self.send_command("{\"cmd\": \"toggle\"}");
+                        if active {
+                            self.send_command("{\"cmd\": \"stop\"}");
+                        } else {
+                            self.send_command("{\"cmd\": \"start\"}");
+                        }
                     }
 
                     // 3. TELEMETRY STREAM

@@ -3,6 +3,7 @@ Virtual Xbox 360 Controller for Rocket League on Linux
 Uses /dev/uinput via evdev to emulate a standard XInput gamepad.
 """
 
+import math
 import evdev
 from evdev import UInput, ecodes, AbsInfo
 
@@ -34,18 +35,21 @@ class VirtualXboxController:
     def reset(self):
         """Release all buttons and center analog axes."""
         self.air_tick = 0
-        # Analog sticks
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, 0)
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, 0)
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_RX, 0)
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_RY, 0)
-        # Triggers
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, 0)
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, 0)
-        # Buttons
-        for btn in [ecodes.BTN_A, ecodes.BTN_B, ecodes.BTN_X, ecodes.BTN_Y, ecodes.BTN_TL, ecodes.BTN_TR]:
-            self.ui.write(ecodes.EV_KEY, btn, 0)
-        self.ui.syn()
+        try:
+            # Analog sticks
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, 0)
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, 0)
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_RX, 0)
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_RY, 0)
+            # Triggers
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, 0)
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, 0)
+            # Buttons
+            for btn in [ecodes.BTN_A, ecodes.BTN_B, ecodes.BTN_X, ecodes.BTN_Y, ecodes.BTN_TL, ecodes.BTN_TR]:
+                self.ui.write(ecodes.EV_KEY, btn, 0)
+            self.ui.syn()
+        except Exception:
+            pass
 
     def apply_action(self, action, on_ground=True, car_z=17.0, time_in_decision=0.0):
         """
@@ -65,18 +69,44 @@ class VirtualXboxController:
             ]
         throttle, steer, pitch, yaw, roll, jump, boost, handbrake = action
 
-        throttle_val = float(throttle)
-        steer_val = float(steer)
-        pitch_val = float(pitch)
-        yaw_val = float(yaw)
-        roll_val = float(roll)
+        try:
+            throttle_val = float(throttle)
+            if math.isnan(throttle_val) or math.isinf(throttle_val): throttle_val = 0.0
+        except (TypeError, ValueError):
+            throttle_val = 0.0
+
+        try:
+            steer_val = float(steer)
+            if math.isnan(steer_val) or math.isinf(steer_val): steer_val = 0.0
+        except (TypeError, ValueError):
+            steer_val = 0.0
+
+        try:
+            pitch_val = float(pitch)
+            if math.isnan(pitch_val) or math.isinf(pitch_val): pitch_val = 0.0
+        except (TypeError, ValueError):
+            pitch_val = 0.0
+
+        try:
+            yaw_val = float(yaw)
+            if math.isnan(yaw_val) or math.isinf(yaw_val): yaw_val = 0.0
+        except (TypeError, ValueError):
+            yaw_val = 0.0
+
+        try:
+            roll_val = float(roll)
+            if math.isnan(roll_val) or math.isinf(roll_val): roll_val = 0.0
+        except (TypeError, ValueError):
+            roll_val = 0.0
+
         jump_val = bool(jump)
         boost_val = bool(boost)
         handbrake_val = bool(handbrake)
 
         # Triggers
-        rt = int(max(0.0, throttle_val) * 255)
-        lt = int(max(0.0, -throttle_val) * 255)
+        rt = int(max(0.0, min(1.0, throttle_val)) * 255)
+        lt = int(max(0.0, min(1.0, -throttle_val)) * 255)
+
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, rt)
         self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, lt)
 
@@ -146,14 +176,17 @@ class VirtualXboxController:
         is_landing = (car_z < 120.0) and handbrake_val
         btn_x = 1 if ((handbrake_val and on_ground) or is_landing or air_roll_btn) else 0
 
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, max(-32768, min(32767, stick_x)))
-        self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, max(-32768, min(32767, stick_y)))
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, 1 if jump_val else 0)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_B, 1 if boost_val else 0)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, btn_x)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, 0)
-        self.ui.write(ecodes.EV_KEY, ecodes.BTN_TR, 0)
-        self.ui.syn()
+        try:
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, max(-32768, min(32767, stick_x)))
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_Y, max(-32768, min(32767, stick_y)))
+            self.ui.write(ecodes.EV_KEY, ecodes.BTN_A, 1 if jump_val else 0)
+            self.ui.write(ecodes.EV_KEY, ecodes.BTN_B, 1 if boost_val else 0)
+            self.ui.write(ecodes.EV_KEY, ecodes.BTN_X, btn_x)
+            self.ui.write(ecodes.EV_KEY, ecodes.BTN_TL, 0)
+            self.ui.write(ecodes.EV_KEY, ecodes.BTN_TR, 0)
+            self.ui.syn()
+        except Exception:
+            pass
         self.prev_jump = jump_val
 
     def close(self):
