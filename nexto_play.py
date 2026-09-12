@@ -40,7 +40,9 @@ import rlbot
 cloak_process_name("portal-helper")
 
 
-def get_current_version():
+def get_current_version(override_ver=None):
+    if override_ver and str(override_ver).strip():
+        return str(override_ver).strip()
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.txt"),
         os.path.join(getattr(sys, "_MEIPASS", ""), "version.txt") if hasattr(sys, "_MEIPASS") else "",
@@ -75,14 +77,14 @@ def is_newer_version(remote_ver, local_ver):
         return False
 
 
-def start_update_checker(ipc_mode=False):
+def start_update_checker(ipc_mode=False, current_version=None):
     """
     Non-blocking background thread that queries the remote repository version.txt.
     If an update is found, emits an IPC message (in IPC mode) or logs to console.
     Errors (offline, 404 while repo is private, timeouts) are silently suppressed.
     """
     def _worker():
-        current_ver = get_current_version()
+        current_ver = get_current_version(current_version)
         remote_url = "https://raw.githubusercontent.com/oypi/prepubot/main/version.txt"
         repo_url = "https://github.com/oypi/prepubot"
         try:
@@ -510,9 +512,10 @@ def main():
     parser.add_argument("--start-active", action="store_true", help="Start playing immediately in IPC mode")
     parser.add_argument("--bot", type=str, default="nexto", choices=["nexto", "seer", "element"], help="Bot AI model (default: nexto)")
     parser.add_argument("--mode", type=str, default="uinput", help="Input mode (default: uinput)")
+    parser.add_argument("--current-version", type=str, default=None, help="Current software version from launcher")
     args = parser.parse_args()
 
-    start_update_checker(ipc_mode=args.ipc)
+    start_update_checker(ipc_mode=args.ipc, current_version=args.current_version)
 
     pid = get_rocket_league_pid()
     if not pid:

@@ -31,9 +31,10 @@ else
 fi
 
 # 2. Compile standalone Python backend with PyInstaller
-echo "[2/4] Bundling Nexto Python backend into standalone executable..."
+echo "[2/4] Bundling Nexto Python backend into pre-extracted directory..."
+rm -rf "$EMBEDDED_DIR/nexto_backend" "$EMBEDDED_DIR/backend.tar.gz"
 "$BUILD_VENV/bin/pyinstaller" \
-    --onefile "$SCRIPT_DIR/nexto_play.py" \
+    --onedir "$SCRIPT_DIR/nexto_play.py" \
     --name nexto_backend \
     --distpath "$EMBEDDED_DIR" \
     --workpath /tmp/build_prepubot \
@@ -53,9 +54,11 @@ echo "[2/4] Bundling Nexto Python backend into standalone executable..."
     --exclude-module pytest \
     -y
 
-
-chmod +x "$EMBEDDED_DIR/nexto_backend"
-echo " Backend binary ready: $(ls -lh "$EMBEDDED_DIR/nexto_backend" | awk '{print $5}')"
+echo " Compressing backend into $EMBEDDED_DIR/backend.tar.gz..."
+tar -czf "$EMBEDDED_DIR/backend.tar.gz" -C "$EMBEDDED_DIR" nexto_backend
+rm -rf "$EMBEDDED_DIR/nexto_backend"
+rm -f "$EMBEDDED_DIR/nexto_backend.pkg" "$EMBEDDED_DIR/nexto_backend"
+echo " Backend payload ready: $(ls -lh "$EMBEDDED_DIR/backend.tar.gz" | awk '{print $5}')"
 
 # 3. Build single Rust executable containing embedded backend
 echo "[3/4] Compiling Rust Tactical GUI with embedded backend payload..."

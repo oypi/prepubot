@@ -17,7 +17,7 @@ core::arch::global_asm!(concat!(
 _embedded_backend_start:
     .incbin ""#,
     env!("CARGO_MANIFEST_DIR"),
-    r#"/embedded_backend/nexto_backend"
+    r#"/embedded_backend/backend.tar.gz"
 _embedded_backend_end:
 "#
 ));
@@ -34,6 +34,26 @@ fn get_embedded_backend() -> &'static [u8] {
         let len = (end as usize).saturating_sub(start as usize);
         std::slice::from_raw_parts(start, len)
     }
+}
+
+fn parse_version(v: &str) -> Vec<u32> {
+    v.trim()
+        .trim_start_matches('v')
+        .split('.')
+        .filter_map(|s| {
+            let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+            digits.parse::<u32>().ok()
+        })
+        .collect()
+}
+
+fn is_newer(remote: &str, current: &str) -> bool {
+    let r = parse_version(remote);
+    let c = parse_version(current);
+    if r.is_empty() || c.is_empty() {
+        return false;
+    }
+    r > c
 }
 
 fn find_dev_script(current_exe: &std::path::Path) -> Option<PathBuf> {
@@ -65,7 +85,7 @@ fn find_dev_script(current_exe: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-fn extract_backend_if_needed() -> Result<PathBuf, String> {
+fn extract_backend_if_needed(state: Option<&Arc<Mutex<SharedState>>>) -> Result<PathBuf, String> {
     // 1. Developer mode: If running via `cargo run` (binary inside target/) or PREPUBOT_DEV is set,
     // prefer running nexto_play.py directly with system python3 for instant code changes.
     let current_exe = std::env::current_exe().unwrap_or_default();
@@ -83,10 +103,9 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
         std::env::temp_dir().join("prepubot")
     };
 
-    std::fs::create_dir_all(&base_dir)
-        .map_err(|e| format!("Failed to create cache directory {:?}: {}", base_dir, e))?;
-
-    let backend_path = base_dir.join("nexto_backend");
+    let backend_dir = base_dir.join("backend");
+    let backend_exe = backend_dir.join("nexto_backend").join("nexto_backend");
+    let stamp_file = backend_dir.join(".version_stamp");
     let embedded = get_embedded_backend();
 
     // If embedded backend exists in this binary
@@ -103,32 +122,64 @@ fn extract_backend_if_needed() -> Result<PathBuf, String> {
             }
         }
 
-        let hash_file = base_dir.join("backend.hash");
-        let cached_hash = std::fs::read_to_string(&hash_file).unwrap_or_default();
-        let expected_hash = format!("{:016x}_{}", hasher, embedded.len());
+        let expected_stamp = format!("{}_{:016x}_{}", env!("CARGO_PKG_VERSION"), hasher, embedded.len());
+        let current_stamp = std::fs::read_to_string(&stamp_file).unwrap_or_default();
 
-        let needs_write = cached_hash != expected_hash || !backend_path.exists();
-
-        if needs_write {
-            let tmp_path = base_dir.join("nexto_backend.tmp");
-            std::fs::write(&tmp_path, embedded)
-                .map_err(|e| format!("Failed to extract backend binary: {}", e))?;
-            if let Ok(m) = std::fs::metadata(&tmp_path) {
-                let mut p = m.permissions();
-                p.set_mode(0o755);
-                let _ = std::fs::set_permissions(&tmp_path, p);
-            }
-            std::fs::rename(&tmp_path, &backend_path)
-                .map_err(|e| format!("Failed to finalize backend binary: {}", e))?;
-            let _ = std::fs::write(&hash_file, expected_hash);
-        } else if let Ok(m) = std::fs::metadata(&backend_path) {
-            let mut p = m.permissions();
-            if p.mode() & 0o111 == 0 {
-                p.set_mode(0o755);
-                let _ = std::fs::set_permissions(&backend_path, p);
-            }
+        // If pre-extracted directory exists and matches version stamp, launch INSTANTLY with 0 extraction!
+        if backend_exe.is_file() && current_stamp == expected_stamp {
+            return Ok(backend_exe);
         }
-        return Ok(backend_path);
+
+        if let Some(s_arc) = state {
+            let mut s = s_arc.lock().unwrap();
+            s.status_msg = "Unpacking Nexto Engine (One-Time Setup)...".to_string();
+        }
+
+        let tmp_dir = base_dir.join("backend_extracting");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| format!("Failed to create extraction dir {:?}: {}", tmp_dir, e))?;
+
+        let mut child = Command::new("tar")
+            .arg("-xzf")
+            .arg("-")
+            .arg("-C")
+            .arg(&tmp_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to execute tar: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(embedded);
+        }
+
+        let output = child.wait_with_output().map_err(|e| format!("tar failed: {}", e))?;
+        if !output.status.success() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tar extraction failed: {}", err));
+        }
+
+        let tmp_exe = tmp_dir.join("nexto_backend").join("nexto_backend");
+        if let Ok(m) = std::fs::metadata(&tmp_exe) {
+            let mut p = m.permissions();
+            p.set_mode(0o755);
+            let _ = std::fs::set_permissions(&tmp_exe, p);
+        }
+
+        let _ = std::fs::write(tmp_dir.join(".version_stamp"), expected_stamp);
+
+        // Atomic swap into permanent backend_dir
+        let _ = std::fs::remove_dir_all(&backend_dir);
+        std::fs::rename(&tmp_dir, &backend_dir)
+            .map_err(|e| format!("Failed to finalize backend dir: {}", e))?;
+
+        if backend_exe.is_file() {
+            return Ok(backend_exe);
+        }
+        return Err(format!("Extracted backend binary not found at {:?}", backend_exe));
     }
 
     // Developer fallback: check nexto_play.py dynamically
@@ -294,7 +345,7 @@ impl PrepuBotApp {
         let stdin_holder = self.child_stdin.clone();
 
         thread::spawn(move || {
-            let backend_target = match extract_backend_if_needed() {
+            let backend_target = match extract_backend_if_needed(Some(&state)) {
                 Ok(p) => p,
                 Err(e) => {
                     let mut s = state.lock().unwrap();
@@ -326,6 +377,8 @@ impl PrepuBotApp {
                 };
 
                 cmd.arg("--ipc")
+                    .arg("--current-version")
+                    .arg(env!("CARGO_PKG_VERSION"))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null());
@@ -411,7 +464,11 @@ impl PrepuBotApp {
                                     } else if telemetry.msg_type == "update_available" {
                                         let ver = telemetry.version.unwrap_or_else(|| "latest".to_string());
                                         let url = telemetry.url.unwrap_or_else(|| "https://github.com/oypi/prepubot".to_string());
-                                        s.update_available = Some((ver, url));
+                                        if is_newer(&ver, env!("CARGO_PKG_VERSION")) {
+                                            s.update_available = Some((ver, url));
+                                        } else {
+                                            s.update_available = None;
+                                        }
                                     }
                                 }
                             } else {
