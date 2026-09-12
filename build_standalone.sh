@@ -45,6 +45,7 @@ rm -rf "$EMBEDDED_DIR/nexto_backend" "$EMBEDDED_DIR/backend.tar.gz"
     --collect-all rlsdk_python \
     --exclude-module matplotlib \
     --exclude-module pandas \
+    --exclude-module scipy \
     --exclude-module sympy \
     --exclude-module PIL \
     --exclude-module tkinter \
@@ -52,7 +53,14 @@ rm -rf "$EMBEDDED_DIR/nexto_backend" "$EMBEDDED_DIR/backend.tar.gz"
     --exclude-module pygments \
     --exclude-module IPython \
     --exclude-module pytest \
+    --exclude-module curses \
+    --exclude-module readline \
     -y
+
+echo " Adding Python source fallback to backend bundle..."
+mkdir -p "$EMBEDDED_DIR/nexto_backend/src_fallback"
+cp "$SCRIPT_DIR/nexto_play.py" "$SCRIPT_DIR/nexto_driver.py" "$SCRIPT_DIR/models_manager.py" "$SCRIPT_DIR/read_position.py" "$SCRIPT_DIR/virtual_controller.py" "$SCRIPT_DIR/version.txt" "$EMBEDDED_DIR/nexto_backend/src_fallback/"
+cp -r "$SCRIPT_DIR/RLMarlbot" "$EMBEDDED_DIR/nexto_backend/src_fallback/"
 
 echo " Compressing backend into $EMBEDDED_DIR/backend.tar.gz..."
 tar -czf "$EMBEDDED_DIR/backend.tar.gz" -C "$EMBEDDED_DIR" nexto_backend

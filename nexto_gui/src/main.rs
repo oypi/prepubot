@@ -467,25 +467,26 @@ impl PrepuBotApp {
                     s.active = false;
                 }
 
-                let mut cmd = if is_python {
-                    let mut c = Command::new("python3");
-                    c.arg(&backend_target);
-                    c
+                // If precompiled binary repeatedly crashes (e.g. glibc mismatch), check for src_fallback
+                let src_fallback = backend_target.parent().unwrap_or(backend_target.as_ref()).join("src_fallback").join("nexto_play.py");
+                let use_python_fallback = rapid_crash_count >= 2 && src_fallback.is_file();
+
+                let (target_exe, is_python_cmd) = if use_python_fallback {
+                    eprintln!("[PrepuBot] Standalone binary incompatible on this system. Falling back to system python3 launcher...");
+                    (src_fallback, true)
+                } else if is_python {
+                    (backend_target.clone(), true)
                 } else {
-                    Command::new(&backend_target)
+                    (backend_target.clone(), false)
                 };
 
-                // Help the PyInstaller bootloader find bundled .so files (especially libpython)
-                if !is_python {
-                    let internal_dir = backend_target.parent().unwrap_or(backend_target.as_ref()).join("_internal");
-                    if internal_dir.is_dir() {
-                        let ld_path = match std::env::var("LD_LIBRARY_PATH") {
-                            Ok(existing) => format!("{}:{}", internal_dir.display(), existing),
-                            Err(_) => internal_dir.display().to_string(),
-                        };
-                        cmd.env("LD_LIBRARY_PATH", &ld_path);
-                    }
-                }
+                let mut cmd = if is_python_cmd {
+                    let mut c = Command::new("python3");
+                    c.arg(&target_exe);
+                    c
+                } else {
+                    Command::new(&target_exe)
+                };
 
                 // Prevent PyTorch/OpenMP SIGABRT duplicate library crashes and thread contention
                 cmd.env("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -512,26 +513,28 @@ impl PrepuBotApp {
                             *holder = Some(stdin);
                         }
 
-                        if let Some(err) = stderr {
+                        if let Some(mut err) = stderr {
                             let log_file_path = if let Ok(home) = std::env::var("HOME") {
                                 PathBuf::from(home).join(".cache").join("prepubot").join("backend.log")
                             } else {
                                 std::env::temp_dir().join("prepubot_backend.log")
                             };
                             thread::spawn(move || {
-                                use std::io::Write;
+                                use std::io::{Read, Write};
                                 let mut f = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
                                     .open(&log_file_path)
                                     .ok();
-                                let err_reader = BufReader::new(err);
-                                for line in err_reader.lines() {
-                                    if let Ok(l) = line {
-                                        eprintln!("[Backend] {}", l);
-                                        if let Some(ref mut file) = f {
-                                            let _ = writeln!(file, "{}", l);
-                                        }
+                                let mut buf = [0u8; 1024];
+                                while let Ok(n) = err.read(&mut buf) {
+                                    if n == 0 { break; }
+                                    let chunk = &buf[..n];
+                                    let text = String::from_utf8_lossy(chunk);
+                                    eprint!("{}", text);
+                                    if let Some(ref mut file) = f {
+                                        let _ = file.write_all(chunk);
+                                        let _ = file.flush();
                                     }
                                 }
                             });
