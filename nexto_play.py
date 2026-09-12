@@ -310,6 +310,7 @@ def action_to_act_str(ctrl):
 
 def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initial_active=False):
     active = initial_active
+    last_toggle_time = 0.0
     focus_guard = False
     input_mode = initial_mode
     fps_timer = time.perf_counter()
@@ -343,10 +344,13 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
                     act_str = "IDLE"
                     controller.reset()
                 elif cmd == "toggle":
-                    active = not active
-                    if not active:
-                        act_str = "IDLE"
-                        controller.reset()
+                    now_t = time.perf_counter()
+                    if now_t - last_toggle_time >= 0.30:
+                        last_toggle_time = now_t
+                        active = not active
+                        if not active:
+                            act_str = "IDLE"
+                            controller.reset()
                 elif cmd == "set_beta":
                     beta = max(0.0, min(1.0, float(msg.get("beta", 1.0))))
                     if hasattr(bot_manager.bot, "beta"):
@@ -426,14 +430,18 @@ def run_ipc(driver, controller, bot_manager, initial_mode="DIRECT MEMORY", initi
             controller.reset()
             act_str = "OUT OF FOCUS"
         elif active:
-            kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
-            if kick_act is not None:
-                controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                act_str = kick_str
-            else:
-                ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
-                controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
-                act_str = action_to_act_str(ctrl)
+            try:
+                kick_act, kick_str = kickoff_mgr.step(car, ball, mates, driver.team, now)
+                if kick_act is not None:
+                    controller.apply_action(kick_act, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                    act_str = kick_str
+                else:
+                    ctrl = bot_manager.step(car, ball, mates, opponents, driver.boost_timers)
+                    controller.apply_action(ctrl, on_ground=(car["on_ground"] > 0.5), car_z=float(car["pos"][2]))
+                    act_str = action_to_act_str(ctrl)
+            except Exception:
+                controller.reset()
+                act_str = "ACTIVE"
         else:
             kickoff_mgr.reset()
             controller.reset()
@@ -549,6 +557,7 @@ def main():
 
     # If in main menu (PlayerController not yet active in a match)
     if not pc_ptr:
+        last_menu_toggle = 0.0
         if args.ipc:
             print(json.dumps({"type": "status", "state": "IN_MENU", "active": is_active, "message": "In Main Menu"}), flush=True)
             while not pc_ptr:
@@ -568,7 +577,10 @@ def main():
                         elif cmd == "stop":
                             is_active = False
                         elif cmd == "toggle":
-                            is_active = not is_active
+                            now_t = time.perf_counter()
+                            if now_t - last_menu_toggle >= 0.30:
+                                last_menu_toggle = now_t
+                                is_active = not is_active
                         elif cmd == "quit":
                             return
                     except Exception:

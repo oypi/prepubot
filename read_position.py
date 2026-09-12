@@ -476,7 +476,7 @@ class RLMemoryReader:
                     self.mem_file.seek(data_ptr)
                     ball_ptr = struct.unpack("<Q", self.mem_file.read(8))[0]
 
-            return (car_ptr if (car_ptr and 0x10000000 < car_ptr < 0x7fffffffffff) else None), (ball_ptr if (ball_ptr and 0x10000000 < ball_ptr < 0x7fffffffffff) else None)
+            return (car_ptr if (car_ptr and 0x10000 < car_ptr < 0x7fffffffffff) else None), (ball_ptr if (ball_ptr and 0x10000 < ball_ptr < 0x7fffffffffff) else None)
         except Exception:
             return None, None
 

@@ -87,6 +87,7 @@ class NextoDriver:
         self.norm = np.array([1.0] * 5 + [2300.0] * 6 + [1.0] * 6 + [5.5] * 3 + [1.0] * 4, dtype=np.float32)
         self.boost_timers = np.zeros(34, dtype=np.float32)
         self.last_obs_time = time.time()
+        self.missing_pc_ticks = 0
 
         if not self.pc_ptr:
             self.reacquire_player_controller()
@@ -99,6 +100,8 @@ class NextoDriver:
     def reacquire_player_controller(self):
         try:
             self.pc_ptr = self.reader.find_player_controller()
+            if self.pc_ptr:
+                self.missing_pc_ticks = 0
         except Exception:
             self.pc_ptr = None
 
@@ -134,14 +137,20 @@ class NextoDriver:
                     c, b = self.reader.get_entities_from_pc(new_pc)
                     if c: self.car_ptr = c
                     if b: self.ball_ptr = b
+                    self.missing_pc_ticks = 0
                 else:
-                    # PlayerController is gone — player left match or returned to main menu!
-                    self.pc_ptr = None
-                    self.car_ptr = None
-                    self.ball_ptr = None
-                    self.mate_ptrs = []
-                    self.opp_ptrs = []
+                    self.missing_pc_ticks += 1
+                    # PlayerController is only invalidated after persistent absence (>25 consecutive ticks ~= 1.5s)
+                    # Transient respawns, demolitions, and goal resets only drop car for 1-2 ticks and must NOT trigger "In Menu"
+                    if self.missing_pc_ticks > 25:
+                        self.pc_ptr = None
+                        self.car_ptr = None
+                        self.ball_ptr = None
+                        self.mate_ptrs = []
+                        self.opp_ptrs = []
                     return False
+            else:
+                self.missing_pc_ticks = 0
 
             if not self.car_ptr or not self.ball_ptr:
                 return False
@@ -163,8 +172,10 @@ class NextoDriver:
 
             return True
         except Exception:
-            self.pc_ptr = None
-            self.reacquire_player_controller()
+            self.missing_pc_ticks += 1
+            if self.missing_pc_ticks > 25:
+                self.pc_ptr = None
+                self.reacquire_player_controller()
             return False
 
     def read_car_state(self, car_ptr=None):

@@ -2,9 +2,25 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+static LAST_F6_PRESS_MS: AtomicU64 = AtomicU64::new(0);
+
+fn should_trigger_f6() -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last = LAST_F6_PRESS_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 350 {
+        return false;
+    }
+    LAST_F6_PRESS_MS.store(now_ms, Ordering::Relaxed);
+    true
+}
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -526,11 +542,13 @@ impl PrepuBotApp {
                             Ok(events) => {
                                 for ev in events {
                                     if ev.event_type() == evdev::EventType::KEY && ev.code() == evdev::KeyCode::KEY_F6.0 && ev.value() == 1 {
-                                        println!("[Hotkey] F6 Pressed! Toggling PrepuBot...");
-                                        if let Ok(mut holder) = child_stdin.lock() {
-                                            if let Some(ref mut stdin) = *holder {
-                                                let _ = writeln!(stdin, "{{\"cmd\": \"toggle\"}}");
-                                                let _ = stdin.flush();
+                                        if should_trigger_f6() {
+                                            println!("[Hotkey] F6 Pressed! Toggling PrepuBot...");
+                                            if let Ok(mut holder) = child_stdin.lock() {
+                                                if let Some(ref mut stdin) = *holder {
+                                                    let _ = writeln!(stdin, "{{\"cmd\": \"toggle\"}}");
+                                                    let _ = stdin.flush();
+                                                }
                                             }
                                         }
                                     }
@@ -581,6 +599,14 @@ impl eframe::App for PrepuBotApp {
         visuals.widgets.active.bg_fill = egui::Color32::from_rgb(240, 240, 242);
         visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
         ui.ctx().set_visuals(visuals);
+
+        // GUI-focused F6 toggle support
+        if ui.input(|i| i.key_pressed(egui::Key::F6)) {
+            if should_trigger_f6() {
+                println!("[GUI Hotkey] F6 Pressed in UI focus! Toggling PrepuBot...");
+                self.send_command("{\"cmd\": \"toggle\"}");
+            }
+        }
 
         let state_guard = self.state.lock().unwrap();
         let connected = state_guard.connected;
