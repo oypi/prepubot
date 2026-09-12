@@ -802,4 +802,26 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import faulthandler
+    faulthandler.enable(file=sys.stderr)
+
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Output crash to stderr for backend.log
+        print(f"[FATAL CRASH] {e}", file=sys.stderr)
+        print(tb, file=sys.stderr)
+        # Also output as IPC JSON to stdout so the GUI can see it
+        try:
+            print(json.dumps({
+                "type": "error",
+                "message": f"BACKEND_CRASH: {type(e).__name__}: {e}",
+                "details": tb
+            }), flush=True)
+        except Exception:
+            pass
+        sys.exit(1)

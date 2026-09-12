@@ -337,6 +337,8 @@ pub struct TelemetryMsg {
     pub version: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub details: Option<String>,
 }
 
 pub struct SharedState {
@@ -437,7 +439,7 @@ impl PrepuBotApp {
 
                 let is_python = backend_target.extension().map_or(false, |ext| ext == "py");
 
-                // Pre-launch sanity check: verify _internal/libpython*.so exists for bundled backends
+                // Pre-launch sanity check: log warning if _internal/libpython*.so is missing
                 if !is_python {
                     let internal_dir = backend_target.parent().unwrap_or(backend_target.as_ref()).join("_internal");
                     if internal_dir.is_dir() {
@@ -451,24 +453,6 @@ impl PrepuBotApp {
                             .unwrap_or(false);
                         if !has_libpython {
                             eprintln!("[PrepuBot] WARNING: _internal/ directory exists but libpython*.so is missing!");
-                            eprintln!("[PrepuBot] Contents of _internal/ (first 20 entries):");
-                            if let Ok(entries) = std::fs::read_dir(&internal_dir) {
-                                for (i, entry) in entries.filter_map(|e| e.ok()).enumerate() {
-                                    if i >= 20 { break; }
-                                    eprintln!("[PrepuBot]   {}", entry.file_name().to_string_lossy());
-                                }
-                            }
-                            // Try purging and re-extracting once
-                            if rapid_crash_count == 0 {
-                                eprintln!("[PrepuBot] Attempting clean re-extraction due to missing libpython...");
-                                if let Ok(home) = std::env::var("HOME") {
-                                    let base_dir = PathBuf::from(home).join(".cache").join("prepubot");
-                                    let _ = std::fs::remove_dir_all(base_dir.join("backend"));
-                                }
-                                rapid_crash_count += 1;
-                                thread::sleep(Duration::from_secs(1));
-                                continue;
-                            }
                         }
                     }
                 }
@@ -612,6 +596,13 @@ impl PrepuBotApp {
                                         } else if raw_msg == "UINPUT_DENIED" {
                                             s.status_msg = "UInput permission denied".to_string();
                                             s.permission_alert = Some("UINPUT PERMISSION: Run 'sudo chmod 666 /dev/uinput'".to_string());
+                                        } else if raw_msg.starts_with("BACKEND_CRASH:") {
+                                            eprintln!("[PrepuBot] BACKEND CRASH: {}", raw_msg);
+                                            if let Some(ref details) = telemetry.details {
+                                                eprintln!("[PrepuBot] Traceback:\n{}", details);
+                                            }
+                                            s.status_msg = raw_msg.clone();
+                                            s.permission_alert = Some(raw_msg);
                                         } else {
                                             s.status_msg = raw_msg;
                                         }
@@ -643,19 +634,12 @@ impl PrepuBotApp {
                             s.fps = 0.0;
                         }
 
-                        // Auto-recovery: If backend crashed within 3 seconds of launching,
-                        // purge the cache so the next iteration re-extracts a clean payload
+                        // Track rapid crashes to avoid infinite restart loops
                         if spawn_instant.elapsed().as_secs() < 3 && exit_res.map_or(false, |st| !st.success()) {
                             rapid_crash_count += 1;
-                            if !is_python && rapid_crash_count <= 3 {
-                                eprintln!("[PrepuBot] Backend crashed on launch (attempt {}/3). Purging backend cache for clean re-extraction...", rapid_crash_count);
-                                if let Ok(home) = std::env::var("HOME") {
-                                    let base_dir = PathBuf::from(home).join(".cache").join("prepubot");
-                                    let _ = std::fs::remove_dir_all(base_dir.join("backend"));
-                                }
-                            } else if rapid_crash_count > 3 {
+                            eprintln!("[PrepuBot] Backend exited quickly (attempt {}/5). Restarting...", rapid_crash_count);
+                            if rapid_crash_count > 5 {
                                 eprintln!("[PrepuBot] Backend crashed {} times in a row. Stopping retry loop.", rapid_crash_count);
-                                eprintln!("[PrepuBot] This usually means your system is missing a library the backend needs.");
                                 eprintln!("[PrepuBot] Check ~/.cache/prepubot/backend.log for details.");
                                 let mut s = state.lock().unwrap();
                                 s.status_msg = "Backend keeps crashing — check backend.log".to_string();
