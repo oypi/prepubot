@@ -7,11 +7,25 @@ clean RLBot GameTickPackets and controller action outputs.
 
 import math
 import os
+import sys
+
+# Python 3.12+ compatibility shim for legacy libraries calling 'import imp' (e.g. flatbuffers)
+if "imp" not in sys.modules:
+    import types
+    import importlib.util
+    _imp = types.ModuleType("imp")
+    _imp.reload = importlib.reload
+    _imp.find_module = lambda name, path=None: None
+    _imp.load_module = lambda name, file, filename, description: None
+    _imp.new_module = lambda name: types.ModuleType(name)
+    _imp.acquire_lock = lambda: None
+    _imp.release_lock = lambda: None
+    _imp.lock_held = lambda: False
+    sys.modules["imp"] = _imp
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import struct
-import sys
 import time
 from typing import Optional, Tuple, Any
 

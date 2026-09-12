@@ -69,6 +69,11 @@ elif "$PYTHON_CMD" -c "import torch, rlbot, evdev, numpy" &>/dev/null; then
     HAS_DEPS=1
 fi
 
+# Ensure existing venvs have modern flatbuffers (fixes Python 3.12+ 'import imp' bug in flatbuffers 1.12)
+if [ -f "$VENV_PY" ]; then
+    "$VENV_DIR/bin/pip" install "flatbuffers>=24.3.25" --quiet 2>/dev/null || true
+fi
+
 if [ "$HAS_DEPS" -eq 0 ]; then
     echo "[*] Setting up Python virtual environment in .venv (one-time setup)..."
     if [ ! -d "$VENV_DIR" ]; then

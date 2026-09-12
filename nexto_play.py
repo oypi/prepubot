@@ -8,6 +8,20 @@ and Virtual Gamepad (uinput) modes.
 import sys
 import os
 
+# Python 3.12+ compatibility shim for legacy libraries that call 'import imp' (e.g. flatbuffers)
+if "imp" not in sys.modules:
+    import types
+    import importlib.util
+    _imp = types.ModuleType("imp")
+    _imp.reload = importlib.reload
+    _imp.find_module = lambda name, path=None: None
+    _imp.load_module = lambda name, file, filename, description: None
+    _imp.new_module = lambda name: types.ModuleType(name)
+    _imp.acquire_lock = lambda: None
+    _imp.release_lock = lambda: None
+    _imp.lock_held = lambda: False
+    sys.modules["imp"] = _imp
+
 # Prevent PyTorch / OpenMP duplicate library conflict crash (SIGABRT)
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
