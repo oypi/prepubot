@@ -7,6 +7,16 @@ and Virtual Gamepad (uinput) modes.
 
 import sys
 import os
+
+# Prevent PyTorch / OpenMP duplicate library conflict crash (SIGABRT)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 import time
 import signal
 import math

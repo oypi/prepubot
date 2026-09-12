@@ -487,6 +487,13 @@ impl PrepuBotApp {
                     }
                 }
 
+                // Prevent PyTorch/OpenMP SIGABRT duplicate library crashes and thread contention
+                cmd.env("KMP_DUPLICATE_LIB_OK", "TRUE")
+                   .env("OMP_NUM_THREADS", "1")
+                   .env("MKL_NUM_THREADS", "1")
+                   .env("OPENBLAS_NUM_THREADS", "1")
+                   .env("PYTHONUNBUFFERED", "1");
+
                 cmd.arg("--ipc")
                     .arg("--current-version")
                     .arg(env!("CARGO_PKG_VERSION"))

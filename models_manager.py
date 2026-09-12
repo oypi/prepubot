@@ -7,6 +7,9 @@ clean RLBot GameTickPackets and controller action outputs.
 
 import math
 import os
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import struct
 import sys
 import time
